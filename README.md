@@ -91,6 +91,16 @@ To drive it with Teton's generator, clone their repository and run this from ins
 python3 event_generator/generate.py --mode adversarial --target http://localhost:8080 --devices 200 --duration 100
 ```
 
+## Measure it
+
+`tools/load` offers events at a set rate from many connections, follows the alarm feed, and reports throughput, latency and whether any alarm was lost. This is the challenge's shape, a 5,000/s baseline with a 30 second burst at 50,000/s:
+
+```bash
+go run ./tools/load -senders 1000 -duration 60s -rate 5000 -burst-rate 50000 -burst-start 15s -burst-duration 30s
+```
+
+Leave out `-rate` to send as fast as the service answers. Results so far are in `NOTES.md`.
+
 ## Layout
 
 | Path | Content |
@@ -102,5 +112,6 @@ python3 event_generator/generate.py --mode adversarial --target http://localhost
 | `internal/metrics/` | Metric types and Prometheus text output |
 | `internal/store/` | PostgreSQL journal and migrations runner |
 | `migrations/` | Versioned schema |
+| `tools/load/` | Load-measurement tool |
 | `tests/integration/` | Restart, replay, concurrency, conflict, fixed-clock read and alarm feed tests |
 | `NOTES.md` | Design decisions and what has been verified |

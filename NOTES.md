@@ -113,6 +113,26 @@ Chosen limits:
 - Single instance only: the alarm wake-up signal and the commit ordering live in the process.
 - The journal grows without bound. Reads need about an hour of it; time-based partitions with a drop job are the intended fix.
 
+## Phase 6: load measurement (method ready, target hardware run pending)
+
+`tools/load` is the measuring tool. Teton's generator sends one request at a time and waits for each reply, so it cannot offer anything near 50,000 events/s; it reached 300 to 700 requests/s here. The tool instead:
+
+- sends from many keep-alive connections, with Teton's event mix over 5,000 devices and a fresh device prefix per run;
+- with `-rate`, offers events on a fixed schedule whether or not the service keeps up. An event no sender is free to take is counted as not sent, so a slow service cannot quietly lower the offered rate;
+- follows the alarm feed and times every fall from just before its POST to its arrival on the feed;
+- counts every outcome and checks that offered = accepted + duplicate + rejected + failed + not sent.
+
+Results on a 2 vCPU sandbox, with the service, PostgreSQL and the load tool sharing the two cores. Throughput on this machine swings between about 4,000 and 11,000 events/s from one five-second interval to the next, so these show behaviour, not capacity:
+
+| Run | Offered | Accepted | Refused | Request p95 | Fall to feed p95 | Falls missing |
+|---|---|---|---|---|---|---|
+| Unpaced, 256 senders, 15 s | 119,086 | 119,086 (7,934/s) | 0 | 71 ms | 75 ms | 0 of 1,574 |
+| 3,000/s with an 8 s burst at 30,000/s, 1,000 senders, 20 s | 276,000 | 138,163 (6,906/s) | 0 | 120 ms | 128 ms | 0 of 1,795 |
+
+In the second run the service was offered about four times what the machine can do. Nothing was refused and no alarm was lost or late: the 137,837 events not sent are ones the tool had no free connection for. In both runs the journal row count equals the accepted count.
+
+The 50,000 events/s figure needs a machine where the load tool is not competing with the service for two cores.
+
 ## Run
 
 ```bash
@@ -124,4 +144,4 @@ go test -race -count=1 -p 1 ./...
 
 ## Deferred
 
-Load measurement, journal retention.
+Load measurement on suitable hardware, journal retention.
