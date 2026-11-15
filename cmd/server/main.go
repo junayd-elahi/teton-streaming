@@ -34,6 +34,7 @@ func run() error {
 		QueueSize:         mustEnvInt("INGEST_QUEUE_SIZE"),
 		PriorityQueueSize: mustEnvInt("INGEST_PRIORITY_QUEUE_SIZE"),
 		BatchSize:         mustEnvInt("INGEST_BATCH_SIZE"),
+		Linger:            time.Duration(mustEnvInt("INGEST_LINGER_MS")) * time.Millisecond,
 		EnqueueTimeout:    time.Duration(mustEnvInt("INGEST_ENQUEUE_TIMEOUT_MS")) * time.Millisecond,
 		CommitTimeout:     time.Duration(mustEnvInt("INGEST_COMMIT_TIMEOUT_MS")) * time.Millisecond,
 	}

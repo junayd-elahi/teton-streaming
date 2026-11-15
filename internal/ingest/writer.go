@@ -30,6 +30,7 @@ type Config struct {
 	QueueSize         int           // ordinary events waiting, per writer
 	PriorityQueueSize int           // fall warnings waiting for their writer
 	BatchSize         int           // maximum events per transaction
+	Linger            time.Duration // how long an ordinary batch waits to fill; 0 = not at all
 	EnqueueTimeout    time.Duration // how long a request waits for queue space
 	CommitTimeout     time.Duration // how long one batch may take before it fails
 }
@@ -69,8 +70,8 @@ type Writer struct {
 
 func NewWriter(journal Journal, cfg Config, m *metrics.Service) *Writer {
 	if cfg.Writers < 1 || cfg.QueueSize < 1 || cfg.PriorityQueueSize < 1 || cfg.BatchSize < 1 ||
-		cfg.EnqueueTimeout <= 0 || cfg.CommitTimeout <= 0 {
-		panic("ingest: every Config value must be positive")
+		cfg.EnqueueTimeout <= 0 || cfg.CommitTimeout <= 0 || cfg.Linger < 0 {
+		panic("ingest: Linger must not be negative and every other Config value must be positive")
 	}
 	lanes := make([]chan request, cfg.Writers)
 	for i := range lanes {
@@ -144,24 +145,33 @@ func (w *Writer) Submit(ctx context.Context, e store.Event) (store.Outcome, erro
 	}
 }
 
-// Run starts one writer per lane and returns when ctx ends.
+// Run starts one writer per lane and returns when ctx ends. Ordinary lanes
+// linger to fill their batches; the fall-warning lane never waits.
 func (w *Writer) Run(ctx context.Context) {
 	var wg sync.WaitGroup
-	for _, lane := range append([]chan request{w.priority}, w.lanes...) {
+	start := func(lane <-chan request, linger time.Duration) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			w.runLane(ctx, lane)
+			w.runLane(ctx, lane, linger)
 		}()
+	}
+	start(w.priority, 0)
+	for _, lane := range w.lanes {
+		start(lane, w.cfg.Linger)
 	}
 	wg.Wait()
 }
 
 // runLane commits one lane's events until ctx ends. It waits for one event,
-// adds whatever else is already waiting up to BatchSize, and commits them
-// together. Batches therefore grow on their own under load and stay at one
-// event when idle.
-func (w *Writer) runLane(ctx context.Context, lane <-chan request) {
+// gathers more for up to linger or until the batch is full, and commits them
+// together.
+//
+// The linger exists because a commit has a fixed cost (one statement, one
+// disk flush) whatever the batch size. Without it a fast database is handed
+// many tiny batches and spends its time on that fixed cost; a few
+// milliseconds of waiting turns them into fewer, fuller ones.
+func (w *Writer) runLane(ctx context.Context, lane <-chan request, linger time.Duration) {
 	batch := make([]request, 0, w.cfg.BatchSize)
 	for {
 		batch = batch[:0]
@@ -171,10 +181,29 @@ func (w *Writer) runLane(ctx context.Context, lane <-chan request) {
 		case <-ctx.Done():
 			return
 		}
-		batch = drain(batch, lane, w.cfg.BatchSize)
+		batch = w.gather(batch, lane, linger)
 		w.observeQueueWait(batch)
 		w.commit(ctx, batch)
 	}
+}
+
+// gather adds requests to the batch until it is full or linger has passed,
+// then takes whatever else is already waiting.
+func (w *Writer) gather(batch []request, lane <-chan request, linger time.Duration) []request {
+	if linger > 0 {
+		timer := time.NewTimer(linger)
+		defer timer.Stop()
+		for len(batch) < w.cfg.BatchSize {
+			select {
+			case req := <-lane:
+				batch = append(batch, req)
+				continue
+			case <-timer.C:
+			}
+			break
+		}
+	}
+	return drain(batch, lane, w.cfg.BatchSize)
 }
 
 // drain appends requests already waiting in queue until the batch is full.

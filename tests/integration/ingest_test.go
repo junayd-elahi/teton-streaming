@@ -61,7 +61,7 @@ func startService(t *testing.T) *service {
 		func() int64 { _, priority := writer.QueueDepths(); return int64(priority) },
 		time.Now)
 	writer = ingest.NewWriter(st, ingest.Config{
-		Writers: 4, QueueSize: 1000, PriorityQueueSize: 1000, BatchSize: 100,
+		Writers: 4, QueueSize: 1000, PriorityQueueSize: 1000, BatchSize: 100, Linger: time.Millisecond,
 		EnqueueTimeout: 2 * time.Second, CommitTimeout: 5 * time.Second,
 	}, m)
 	go writer.Run(writerCtx)
