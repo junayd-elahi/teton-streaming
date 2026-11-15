@@ -55,16 +55,20 @@ func main() {
 	}
 
 	client := newClient(cfg.Senders)
+	// The feed consumer has its own connection. Sharing the senders' pool
+	// would make it queue behind them for a free connection under load, and
+	// the tool would then report its own delay as alarm latency.
+	feedClient := newClient(1)
 	prefix := fmt.Sprintf("load%d", time.Now().UnixNano())
 	falls := newFallTracker()
-	cursor, err := currentCursor(client, cfg.Target)
+	cursor, err := currentCursor(feedClient, cfg.Target)
 	if err != nil {
 		fatal("reading the alarm feed: %v", err)
 	}
 	stopFeed := make(chan struct{})
 	feedDone := make(chan struct{})
 	go func() {
-		followFeed(client, cfg.Target, cursor, prefix, falls, stopFeed)
+		followFeed(feedClient, cfg.Target, cursor, prefix, falls, stopFeed)
 		close(feedDone)
 	}()
 
