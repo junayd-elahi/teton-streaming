@@ -19,7 +19,7 @@ Docker: `docker compose up --build` verified on Windows with Docker Desktop (15 
 
 ## Phase 2: journal and validation (done 15 Nov 2026)
 
-- Each event type's own field is validated (boolean, 0 to 1 range, enum, number). Bad input is a 400.
+- Each event type's own field is validated (boolean, 0 to 1 range, enum, number). Bad input is a 400. See the hardening section for inputs that used to slip through.
 - Requests go into a bounded queue. One writer takes whatever is waiting, up to `INGEST_BATCH_SIZE`, and commits it as one transaction. Batches grow by themselves under load; there is no flush timer.
 - One writer means journal id order equals commit order.
 - If the queue stays full for `INGEST_ENQUEUE_TIMEOUT_MS`, the request gets 503 with `Retry-After`. Storage failure is also 503. Both are safe to retry.
@@ -27,7 +27,7 @@ Docker: `docker compose up --build` verified on Windows with Docker Desktop (15 
 
 Verified:
 
-- `go test -race -count=5 ./...` passes (10 tests).
+- `go test -race -count=5 ./...` passes.
 - 50 simultaneous copies of one event: one row, exactly one reported as the original.
 - 20 simultaneous events with one identity and different content: one accepted, 19 conflicts.
 - Reply dropped after commit, then retry: 200 duplicate, one row.
@@ -49,8 +49,8 @@ Verified:
 - Same events in order, reversed and interleaved give identical results.
 - Two devices in one room, including an equal-timestamp tie, follow the documented rule.
 - Health edges: a heartbeat exactly 300 s old is excluded, one at the current instant is included, two in one second count once, 300 consecutive seconds give 1.0.
-- Teton's smoke evaluator, 50 devices: 1,464 sent, 0 failed, both read endpoints answer. Alarms are still missing.
-- Both read queries use index-only scans.
+- Teton's smoke evaluator, 50 devices: 1,464 sent, 0 failed, both read endpoints answer.
+- Both read queries use the partial indexes (checked with EXPLAIN on a small table).
 
 ## Phase 4: fall alarms and resumable feed (done 15 Nov 2026)
 
@@ -73,6 +73,28 @@ Verified:
 - Cursor saved, service restarted, new falls sent including one with an older event time and a jitter copy: resume returns exactly the two new alarms, in commit order.
 - Long poll answers within a second of a fall being sent; an empty wait returns after the wait.
 - Teton's generator, adversarial mode, 300 devices, service hard-killed and restarted mid-run: 22,606 acknowledged, 22,606 journaled, 289 distinct falls among them, 289 alarms. The generator does not retry, so the 272 requests it sent while the service was down are not in the journal.
+
+## Hardening after an independent test and review (15 Nov 2026)
+
+The service was attacked with hostile input and reviewed against the brief. Defects found and fixed:
+
+- **Poison events.** Values PostgreSQL refuses (NUL characters, numbers beyond float range or with huge literals, ids too long for an index) passed validation, failed the batch insert, and turned every valid event in that batch into a 503. Measured before the fix: 60 poison events caused 400 valid events to be refused. Now they are rejected as 400 before queueing. As a backstop, when PostgreSQL refuses a batch over its data, the writer commits each event alone, so only the bad one fails. After the fix: 4,740 of 4,740 valid events accepted alongside 60 poison events.
+- **Alarm reads broken by one fall.** A confidence of `1e-400` parsed to zero, passed the range check, and then failed conversion on every alarm read, including after restart. Underflowing numbers are now rejected, and confidence is stored as a float so a read cannot fail on it.
+- **Query parameters.** `NaN`, infinities and out-of-range values for `since` and `wait` are rejected.
+- **Request body.** Data after the JSON object is rejected.
+- **Server.** Read, write and idle timeouts are set. The database port is bound to localhost and the container runs as a non-root user.
+- **Alarm shape.** `event_id` added, as documented by Teton's evaluator.
+
+Rough throughput measured by the independent tester on a 2 vCPU machine, with server, database and load tool sharing it: about 14,000 events/s at 1,000 concurrent senders, alarm delivery p95 130 ms, no refusals. That machine cannot say whether 50,000/s is reachable.
+
+Open items carried into the next phases:
+
+- Falls share one queue with every other event type, so they get no priority under overload.
+- Events dated ahead of the server clock are hidden until the clock reaches them. With the schema's normal clock skew of up to 30 s, a healthy device whose clock runs behind tops out at 0.9 availability, and one running ahead shows state up to 30 s late.
+- `since` on the snapshot filters by event time, so a poller using its last poll time misses late falls. The cursor feed does not have this problem.
+- The journal grows without bound. Reads need about one hour of it.
+- The generator restarts sequence numbers on every run. Several runs against one database reuse identities with new content and are refused as conflicts; use a fresh database per run.
+- Single instance only: the alarm wake-up signal and commit ordering are in-process.
 
 ## Run
 

@@ -12,7 +12,7 @@ Work in progress.
 |---|---|
 | Durable ingestion (`POST /events`) | Done |
 | Idempotent retries and conflict detection | Done |
-| Validation of all six event types | Done |
+| Validation of all six event types, hostile input rejected | Done |
 | Bounded queue with one batching writer | Done |
 | Device health over 5 minutes (`GET /devices/{id}/health`) | Done |
 | Room occupancy over 1m, 5m, 1h (`GET /rooms/{id}/occupancy`) | Done |
@@ -75,10 +75,10 @@ The integration tests need the database running:
 go test -race -count=1 -p 1 ./...
 ```
 
-To drive it with Teton's generator, clone their repository next to this one and run:
+To drive it with Teton's generator, clone their repository and run this from inside it. Use a fresh database per run, because the generator restarts its sequence numbers each time. Offline mode needs at least 95 seconds for devices to reconnect and replay.
 
 ```bash
-python3 event_generator/generate.py --mode adversarial --target http://localhost:8080 --devices 200 --duration 20
+python3 event_generator/generate.py --mode adversarial --target http://localhost:8080 --devices 200 --duration 100
 ```
 
 ## Layout
