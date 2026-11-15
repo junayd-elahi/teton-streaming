@@ -9,6 +9,7 @@ import (
 )
 
 type alarm struct {
+	EventID    string  `json:"event_id"`
 	AlarmID    int64   `json:"alarm_id"`
 	DeviceID   string  `json:"device_id"`
 	RoomID     string  `json:"room_id"`
@@ -56,7 +57,7 @@ func TestJitterCopiesProduceOneAlarm(t *testing.T) {
 	if len(page.Alarms) != 1 {
 		t.Fatalf("%d alarms, want 1", len(page.Alarms))
 	}
-	want := alarm{AlarmID: 1, DeviceID: "dev_f1", RoomID: "room_f", Type: "fall_warn",
+	want := alarm{EventID: "dev_f1:10", AlarmID: 1, DeviceID: "dev_f1", RoomID: "room_f", Type: "fall_warn",
 		TS: "2026-11-15T11:59:00.000Z", Seq: 10, Confidence: 0.92}
 	if page.Alarms[0] != want {
 		t.Fatalf("got %+v, want %+v", page.Alarms[0], want)

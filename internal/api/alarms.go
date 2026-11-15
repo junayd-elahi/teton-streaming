@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 	"math"
 	"net/http"
@@ -117,12 +118,15 @@ func parseSince(raw string) (time.Time, error) {
 	return time.Time{}, errors.New("since must be unix seconds or an ISO 8601 timestamp")
 }
 
-// alarmObjects keeps the fields of the original fall_warn event and adds the
-// feed cursor and receipt time.
+// alarmObjects returns the fields Teton's evaluator documents (event_id,
+// room_id, ts, confidence), the rest of the original fall_warn event, and the
+// feed cursor and receipt time. event_id is the identity of the first event
+// seen for the fall: "<device_id>:<seq>".
 func alarmObjects(alarms []store.Alarm) []map[string]any {
 	objects := make([]map[string]any, len(alarms))
 	for i, a := range alarms {
 		objects[i] = map[string]any{
+			"event_id":    fmt.Sprintf("%s:%d", a.DeviceID, a.Seq),
 			"alarm_id":    a.ID,
 			"device_id":   a.DeviceID,
 			"room_id":     a.RoomID,
