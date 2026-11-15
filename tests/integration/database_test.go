@@ -12,9 +12,22 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 var testDatabaseURLs sync.Map
+
+// adminConn opens one plain connection for creating and dropping schemas. The
+// URL is parsed as a pool URL because DATABASE_URL may carry pool settings
+// such as pool_max_conns, which a plain connection would send to the server
+// as an unknown parameter.
+func adminConn(ctx context.Context, baseURL string) (*pgx.Conn, error) {
+	cfg, err := pgxpool.ParseConfig(baseURL)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.ConnectConfig(ctx, cfg.ConnConfig)
+}
 
 // Each test owns one random schema. Reopening a service within that test
 // reuses its schema so restart tests retain their committed state.
@@ -33,7 +46,7 @@ func isolatedDatabaseURL(t *testing.T) string {
 	}
 	schema := "teton_test_" + hex.EncodeToString(random[:])
 	ctx := context.Background()
-	conn, err := pgx.Connect(ctx, baseURL)
+	conn, err := adminConn(ctx, baseURL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +65,7 @@ func isolatedDatabaseURL(t *testing.T) string {
 	testDatabaseURLs.Store(t, testURL)
 	t.Cleanup(func() {
 		testDatabaseURLs.Delete(t)
-		conn, err := pgx.Connect(ctx, baseURL)
+		conn, err := adminConn(ctx, baseURL)
 		if err != nil {
 			t.Errorf("cleaning test schema: %v", err)
 			return

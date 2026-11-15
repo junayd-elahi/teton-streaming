@@ -14,8 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-
 	"github.com/junayd-elahi/teton-streaming/internal/api"
 	"github.com/junayd-elahi/teton-streaming/internal/ingest"
 	"github.com/junayd-elahi/teton-streaming/internal/metrics"
@@ -132,7 +130,7 @@ func count(t *testing.T, svc *service) int64 {
 
 func reset(t *testing.T, svc *service) {
 	t.Helper()
-	conn, err := pgx.Connect(context.Background(), svc.databaseURL)
+	conn, err := adminConn(context.Background(), svc.databaseURL)
 	if err != nil {
 		t.Fatal(err)
 	}

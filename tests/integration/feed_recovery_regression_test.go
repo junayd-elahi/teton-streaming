@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/junayd-elahi/teton-streaming/internal/store"
 )
 
@@ -34,7 +33,7 @@ func TestLongPollRecoversACommittedAlarmWithoutNotification(t *testing.T) {
 	}()
 	// Observe that the initial empty query has completed before committing a
 	// row without the writer's in-process signal.
-	conn, err := pgx.Connect(context.Background(), svc.databaseURL)
+	conn, err := adminConn(context.Background(), svc.databaseURL)
 	if err != nil {
 		t.Fatal(err)
 	}

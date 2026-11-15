@@ -6,14 +6,12 @@ import (
 	"net/http"
 	"testing"
 	"time"
-
-	"github.com/jackc/pgx/v5"
 )
 
 func TestLongPollDatabaseWaitHonorsRequestedDeadline(t *testing.T) {
 	svc := startService(t)
 	defer svc.stop()
-	conn, err := pgx.Connect(context.Background(), svc.databaseURL)
+	conn, err := adminConn(context.Background(), svc.databaseURL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,12 +39,12 @@ func TestLongPollReturnsEmptyPageWhenPeriodicReadHitsLockAtDeadline(t *testing.T
 	svc := startService(t)
 	defer svc.stop()
 
-	conn, err := pgx.Connect(context.Background(), svc.databaseURL)
+	conn, err := adminConn(context.Background(), svc.databaseURL)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer conn.Close(context.Background())
-	lockConn, err := pgx.Connect(context.Background(), svc.databaseURL)
+	lockConn, err := adminConn(context.Background(), svc.databaseURL)
 	if err != nil {
 		t.Fatal(err)
 	}

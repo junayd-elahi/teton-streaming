@@ -191,7 +191,7 @@ In a separate 30-second target phase with 2,000 senders and 5,000 devices, the t
 
 Database row deltas matched both accepted events and accepted falls and remained unchanged after a hard API-process kill. The database itself was not killed. This is not a disk-failure or backup/restore test.
 
-The explicit full-offer validation failed and the load CLI exited nonzero. The 50,000/s target remains unmet. This isolated target phase does not replace the complete baseline, repeated bursts, offline replay and recovery scenario, and establishes no interview score.
+The explicit full-offer validation failed and the load CLI exited nonzero. The 50,000/s target remains unmet. This isolated target phase does not replace the complete baseline, repeated bursts, offline replay and recovery scenario.
 
 ## Run
 
