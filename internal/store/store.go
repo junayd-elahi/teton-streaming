@@ -47,6 +47,9 @@ func Open(ctx context.Context, url string) (*Store, error) {
 
 func (s *Store) Close() { s.pool.Close() }
 
+// MaxConns is the size of the connection pool.
+func (s *Store) MaxConns() int { return int(s.pool.Config().MaxConns) }
+
 // Ping checks that the database answers.
 func (s *Store) Ping(ctx context.Context) error { return s.pool.Ping(ctx) }
 
@@ -125,8 +128,7 @@ type BatchResult struct {
 	NewAlarms int       // logical falls first seen in this batch
 }
 
-// AppendBatch commits the events to the journal in one transaction, in slice
-// order, and reports one Outcome per event. Every newly journaled fall_warn
+// AppendBatch commits the events to the journal atomically, in slice order, and reports one Outcome per event. Every newly journaled fall_warn
 // also creates its alarm in the same transaction, unless an alarm for the same
 // logical fall already exists. An identity (device_id, seq, ts) that is
 // already journaled, or that appears earlier in the same batch, is not inserted
@@ -147,16 +149,10 @@ func (s *Store) AppendBatch(ctx context.Context, events []Event) (BatchResult, e
 		tss[i], payloads[i], hashes[i], receivedAts[i] = e.TS, string(e.Payload), e.PayloadHash, e.ReceivedAt
 	}
 
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return BatchResult{}, err
-	}
-	defer tx.Rollback(ctx)
-
-	// Insert in arrival order so journal ids follow it, then derive alarms
-	// from the rows this statement actually inserted.
-	var newAlarms int
-	if err := tx.QueryRow(ctx, `
+	// One statement, so the events and their alarms commit together or not at
+	// all. It inserts in arrival order, derives alarms from the rows it
+	// actually inserted, and returns the identities of those rows.
+	rows, err := s.pool.Query(ctx, `
 		WITH inserted AS (
 			INSERT INTO event_log (device_id, seq, room_id, type, ts, payload, payload_hash, received_at)
 			SELECT device_id, seq, room_id, type, ts, payload::jsonb, payload_hash, received_at
@@ -175,69 +171,109 @@ func (s *Store) AppendBatch(ctx context.Context, events []Event) (BatchResult, e
 			ON CONFLICT (device_id, room_id, ts, confidence) DO NOTHING
 			RETURNING 1
 		)
-		SELECT count(*) FROM new_alarms`,
-		deviceIDs, seqs, roomIDs, types, tss, payloads, hashes, receivedAts).Scan(&newAlarms); err != nil {
-		return BatchResult{}, err
-	}
-
-	// Read back the journaled row for every identity in the batch. A row whose id
-	// is new in this transaction (xmin = current transaction) was inserted by it.
-	type journaled struct {
-		hash        []byte
-		insertedNow bool
-	}
-	type identity struct {
-		deviceID string
-		seq      int64
-		tsMicros int64
-	}
-	rows, err := tx.Query(ctx, `
-		SELECT e.device_id, e.seq, e.ts, e.payload_hash, e.xmin::text = pg_current_xact_id()::xid::text
-		FROM event_log e
-		JOIN (SELECT DISTINCT * FROM unnest($1::text[], $2::bigint[], $3::timestamptz[]) AS k(device_id, seq, ts)) k
-		  ON e.device_id = k.device_id AND e.seq = k.seq AND e.ts = k.ts`,
-		deviceIDs, seqs, tss)
+		SELECT device_id, seq, ts, (SELECT count(*) FROM new_alarms) FROM inserted`,
+		deviceIDs, seqs, roomIDs, types, tss, payloads, hashes, receivedAts)
 	if err != nil {
 		return BatchResult{}, err
 	}
-	stored := make(map[identity]journaled, n)
+	var newAlarms int
+	inserted := make(map[identity]bool, n)
 	for rows.Next() {
 		var id identity
 		var ts time.Time
-		var j journaled
-		if err := rows.Scan(&id.deviceID, &id.seq, &ts, &j.hash, &j.insertedNow); err != nil {
+		if err := rows.Scan(&id.deviceID, &id.seq, &ts, &newAlarms); err != nil {
 			rows.Close()
 			return BatchResult{}, err
 		}
 		id.tsMicros = ts.UnixMicro()
-		stored[id] = j
+		inserted[id] = true
 	}
 	if err := rows.Err(); err != nil {
 		return BatchResult{}, err
 	}
 
+	// Classify each event. The first event for an identity this batch inserted
+	// is the new row. A later copy in the same batch is compared with that
+	// first one. An identity the batch did not insert was journaled before, and
+	// only those need a look at the stored hash.
 	outcomes := make([]Outcome, n)
-	claimed := make(map[identity]bool, n) // identities whose new row is already attributed
+	firstHash := make(map[identity][]byte, len(inserted))
+	var earlier []int // indexes of events whose identity was journaled before this batch
 	for i, e := range events {
-		id := identity{e.DeviceID, e.Seq, e.TS.UnixMicro()}
-		j, ok := stored[id]
-		if !ok {
-			return BatchResult{}, fmt.Errorf("event %s/%d missing from journal after insert", e.DeviceID, e.Seq)
-		}
-		switch {
-		case !bytes.Equal(j.hash, e.PayloadHash):
-			outcomes[i] = Conflict
-		case j.insertedNow && !claimed[id]:
+		id := identityOf(e)
+		switch first, claimed := firstHash[id]; {
+		case claimed:
+			outcomes[i] = compareHashes(first, e.PayloadHash)
+		case inserted[id]:
 			outcomes[i] = Inserted
-			claimed[id] = true
+			firstHash[id] = e.PayloadHash
 		default:
-			outcomes[i] = Duplicate
+			earlier = append(earlier, i)
 		}
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return BatchResult{}, err
+	if len(earlier) > 0 {
+		stored, err := s.storedHashes(ctx, events, earlier)
+		if err != nil {
+			return BatchResult{}, err
+		}
+		for _, i := range earlier {
+			hash, ok := stored[identityOf(events[i])]
+			if !ok {
+				return BatchResult{}, fmt.Errorf("event %s/%d neither inserted nor already journaled",
+					events[i].DeviceID, events[i].Seq)
+			}
+			outcomes[i] = compareHashes(hash, events[i].PayloadHash)
+		}
 	}
 	return BatchResult{Outcomes: outcomes, NewAlarms: newAlarms}, nil
+}
+
+// identity is what makes two events the same event.
+type identity struct {
+	deviceID string
+	seq      int64
+	tsMicros int64
+}
+
+func identityOf(e Event) identity { return identity{e.DeviceID, e.Seq, e.TS.UnixMicro()} }
+
+func compareHashes(stored, sent []byte) Outcome {
+	if bytes.Equal(stored, sent) {
+		return Duplicate
+	}
+	return Conflict
+}
+
+// storedHashes returns the journaled payload hash for the events at the given
+// indexes.
+func (s *Store) storedHashes(ctx context.Context, events []Event, indexes []int) (map[identity][]byte, error) {
+	deviceIDs := make([]string, len(indexes))
+	seqs := make([]int64, len(indexes))
+	tss := make([]time.Time, len(indexes))
+	for k, i := range indexes {
+		deviceIDs[k], seqs[k], tss[k] = events[i].DeviceID, events[i].Seq, events[i].TS
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT e.device_id, e.seq, e.ts, e.payload_hash
+		FROM unnest($1::text[], $2::bigint[], $3::timestamptz[]) AS k(device_id, seq, ts)
+		JOIN event_log e ON e.device_id = k.device_id AND e.seq = k.seq AND e.ts = k.ts`,
+		deviceIDs, seqs, tss)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	stored := make(map[identity][]byte, len(indexes))
+	for rows.Next() {
+		var id identity
+		var ts time.Time
+		var hash []byte
+		if err := rows.Scan(&id.deviceID, &id.seq, &ts, &hash); err != nil {
+			return nil, err
+		}
+		id.tsMicros = ts.UnixMicro()
+		stored[id] = hash
+	}
+	return stored, rows.Err()
 }
 
 // CountEvents returns the number of journaled events.
