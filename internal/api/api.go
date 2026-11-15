@@ -25,16 +25,19 @@ var eventTypes = map[string]bool{
 
 type Server struct {
 	writer *ingest.Writer
+	store  *store.Store
 	now    func() time.Time
 }
 
-func New(w *ingest.Writer, now func() time.Time) *Server {
-	return &Server{writer: w, now: now}
+func New(w *ingest.Writer, st *store.Store, now func() time.Time) *Server {
+	return &Server{writer: w, store: st, now: now}
 }
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /events", s.postEvent)
+	mux.HandleFunc("GET /devices/{device_id}/health", s.getDeviceHealth)
+	mux.HandleFunc("GET /rooms/{room_id}/occupancy", s.getRoomOccupancy)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	})

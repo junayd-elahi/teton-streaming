@@ -30,6 +30,8 @@ type service struct {
 	store      *store.Store
 	srv        *httptest.Server
 	stopWriter context.CancelFunc
+	// clock is the time the service believes it is. Tests move it.
+	clock time.Time
 	// dropNextResponse makes the server process the next request fully and then
 	// close the connection without replying, like a response lost on the network.
 	dropNextResponse bool
@@ -54,8 +56,8 @@ func startService(t *testing.T) *service {
 	writer := ingest.NewWriter(st, ingest.Config{QueueSize: 1000, BatchSize: 100, EnqueueTimeout: 2 * time.Second})
 	go writer.Run(writerCtx)
 
-	svc := &service{store: st, stopWriter: stopWriter}
-	handler := api.New(writer, func() time.Time { return fixedNow }).Handler()
+	svc := &service{store: st, stopWriter: stopWriter, clock: fixedNow}
+	handler := api.New(writer, st, func() time.Time { return svc.clock }).Handler()
 	svc.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !svc.dropNextResponse {
 			handler.ServeHTTP(w, r)

@@ -44,7 +44,7 @@ func run() error {
 	go writer.Run(ctx)
 
 	slog.Info("listening", "addr", listenAddr)
-	return http.ListenAndServe(listenAddr, api.New(writer, time.Now).Handler())
+	return http.ListenAndServe(listenAddr, api.New(writer, st, time.Now).Handler())
 }
 
 func mustEnv(key string) string {
