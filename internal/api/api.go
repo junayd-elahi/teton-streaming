@@ -10,13 +10,21 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/junayd-elahi/teton-streaming/internal/ingest"
 	"github.com/junayd-elahi/teton-streaming/internal/store"
 )
 
-const maxFutureSkew = time.Hour
+const (
+	maxFutureSkew = time.Hour
+	maxBodyBytes  = 64 << 10
+	// maxIDLength keeps device and room ids far below PostgreSQL's index row limit.
+	maxIDLength = 128
+	// maxNumberLength bounds a numeric literal so it always fits the jsonb column.
+	maxNumberLength = 32
+)
 
 var eventTypes = map[string]bool{
 	"heartbeat": true, "presence": true, "motion": true,
@@ -49,7 +57,7 @@ func (s *Server) Handler() http.Handler {
 // acknowledgement and a retry of the same event is safe.
 func (s *Server) postEvent(w http.ResponseWriter, r *http.Request) {
 	received := s.now()
-	event, err := parseEvent(http.MaxBytesReader(w, r.Body, 64<<10), received)
+	event, err := parseEvent(http.MaxBytesReader(w, r.Body, maxBodyBytes), received)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
@@ -59,12 +67,14 @@ func (s *Server) postEvent(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, ingest.ErrOverloaded):
 		w.Header().Set("Retry-After", "1")
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "overloaded, retry"})
+	case store.IsUnstorable(err):
+		slog.Warn("event refused by storage", "device_id", event.DeviceID, "seq", event.Seq, "err", err)
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "event holds a value that cannot be stored"})
 	case err != nil:
 		slog.Error("journal write failed", "err", err)
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable, retry"})
 	case outcome == store.Conflict:
-		slog.Warn("identity conflict", "device_id", event.DeviceID, "seq", event.Seq,
-			"payload", string(event.Payload))
+		slog.Warn("identity conflict", "device_id", event.DeviceID, "seq", event.Seq)
 		writeJSON(w, http.StatusConflict, map[string]any{
 			"error": "device_id and seq already used with different content"})
 	default:
@@ -86,12 +96,18 @@ func parseEvent(body io.Reader, received time.Time) (store.Event, error) {
 	if raw == nil {
 		return store.Event{}, errors.New("body must be a json object")
 	}
+	if dec.More() {
+		return store.Event{}, errors.New("body must hold exactly one json object")
+	}
+	if err := validateStorable(raw); err != nil {
+		return store.Event{}, err
+	}
 
-	deviceID, err := requiredString(raw, "device_id")
+	deviceID, err := requiredID(raw, "device_id")
 	if err != nil {
 		return store.Event{}, err
 	}
-	roomID, err := requiredString(raw, "room_id")
+	roomID, err := requiredID(raw, "room_id")
 	if err != nil {
 		return store.Event{}, err
 	}
@@ -192,6 +208,52 @@ func requiredUnitInterval(raw map[string]any, key string) error {
 		return fmt.Errorf("%s must be between 0 and 1", key)
 	}
 	return nil
+}
+
+// validateStorable rejects values PostgreSQL cannot hold in a jsonb column,
+// anywhere in the event including fields this service does not interpret:
+// NUL characters in text, and numbers too long or too large to represent.
+func validateStorable(value any) error {
+	switch v := value.(type) {
+	case string:
+		if strings.ContainsRune(v, 0) {
+			return errors.New("text must not contain NUL characters")
+		}
+	case json.Number:
+		if len(v) > maxNumberLength {
+			return fmt.Errorf("number literals must be at most %d characters", maxNumberLength)
+		}
+		if _, err := v.Float64(); err != nil {
+			return errors.New("number is out of range")
+		}
+	case map[string]any:
+		for key, item := range v {
+			if err := validateStorable(key); err != nil {
+				return err
+			}
+			if err := validateStorable(item); err != nil {
+				return err
+			}
+		}
+	case []any:
+		for _, item := range v {
+			if err := validateStorable(item); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func requiredID(raw map[string]any, key string) (string, error) {
+	v, err := requiredString(raw, key)
+	if err != nil {
+		return "", err
+	}
+	if len(v) > maxIDLength {
+		return "", fmt.Errorf("%s must be at most %d bytes", key, maxIDLength)
+	}
+	return v, nil
 }
 
 func requiredString(raw map[string]any, key string) (string, error) {

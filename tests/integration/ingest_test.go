@@ -28,6 +28,7 @@ const heartbeat = `{"device_id":"dev_0001","room_id":"room_001","type":"heartbea
 // service is one running instance: store, writer and HTTP server.
 type service struct {
 	store      *store.Store
+	writer     *ingest.Writer
 	srv        *httptest.Server
 	stopWriter context.CancelFunc
 	// clock is the time the service believes it is. Tests move it.
@@ -56,7 +57,7 @@ func startService(t *testing.T) *service {
 	writer := ingest.NewWriter(st, ingest.Config{QueueSize: 1000, BatchSize: 100, EnqueueTimeout: 2 * time.Second})
 	go writer.Run(writerCtx)
 
-	svc := &service{store: st, stopWriter: stopWriter, clock: fixedNow}
+	svc := &service{store: st, writer: writer, stopWriter: stopWriter, clock: fixedNow}
 	handler := api.New(writer, st, func() time.Time { return svc.clock }).Handler()
 	svc.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !svc.dropNextResponse {

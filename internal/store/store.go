@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/junayd-elahi/teton-streaming/internal/aggregation"
@@ -92,6 +93,18 @@ func (s *Store) applyMigration(ctx context.Context, files fs.FS, name string) er
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+// IsUnstorable reports whether err means PostgreSQL refused the data itself
+// (a value it cannot represent or index), as opposed to being unavailable.
+// Retrying such an event can never succeed.
+func IsUnstorable(err error) bool {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return false
+	}
+	class := pgErr.Code[:2]
+	return class == "22" || class == "54" // data exception, program limit exceeded
 }
 
 // Outcome says what happened to one event in a committed batch.

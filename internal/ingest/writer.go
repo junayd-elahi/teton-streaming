@@ -131,6 +131,15 @@ func (w *Writer) commit(ctx context.Context, batch []request) {
 		events[i] = req.event
 	}
 	committed, err := w.journal.AppendBatch(ctx, events)
+	if err != nil && len(batch) > 1 && store.IsUnstorable(err) {
+		// One event in the batch holds data the database refuses. Commit each
+		// event on its own so only that event fails and the rest are not
+		// rejected along with it.
+		for _, req := range batch {
+			w.commit(ctx, []request{req})
+		}
+		return
+	}
 	for i, req := range batch {
 		if err != nil {
 			req.done <- result{err: err}
