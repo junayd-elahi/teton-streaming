@@ -26,11 +26,11 @@ Work in progress.
 ## How ingestion works
 
 1. `POST /events` validates the envelope, the type-specific field and the timestamp. An event dated more than one hour ahead is rejected.
-2. Valid events go into a bounded queue. One writer takes whatever is waiting, up to a batch limit, and commits it as one transaction.
+2. Valid events go into bounded queues, one per writer, chosen by device so a device's events stay in order. Each writer takes whatever is waiting, up to a batch limit, and commits it as one atomic statement.
 3. The request is answered only after its batch commits, so a `200` means the event is on disk.
 4. `(device_id, seq, ts)` identifies an event. Sending the same event again returns `200` with `"duplicate": true` and changes nothing. Reusing the identity with different content returns `409`.
 5. If the queue stays full, the request gets `503` with `Retry-After`. Retrying is always safe.
-6. Fall warnings have their own queue and are committed ahead of everything else, so a burst of heartbeats cannot delay or crowd out an alarm.
+6. Fall warnings have their own queue and their own writer, so a burst of heartbeats cannot delay or crowd out an alarm.
 
 ## How the reads work
 
@@ -97,6 +97,12 @@ python3 event_generator/generate.py --mode adversarial --target http://localhost
 
 ```bash
 go run ./tools/load -senders 1000 -duration 60s -rate 5000 -burst-rate 50000 -burst-start 15s -burst-duration 30s
+```
+
+On Docker Desktop for Windows, run it inside Docker's network, because the Windows port proxy roughly halves throughput:
+
+```bash
+docker run --rm --network teton-streaming_default -v "${PWD}:/src" -w /src golang:1.24 go run ./tools/load -target http://server:8080 -senders 2000 -duration 60s -rate 5000 -burst-rate 50000 -burst-start 15s -burst-duration 30s
 ```
 
 Leave out `-rate` to send as fast as the service answers. Results so far are in `NOTES.md`.

@@ -21,7 +21,7 @@ Docker: `docker compose up --build` verified on Windows with Docker Desktop (15 
 
 - Each event type's own field is validated (boolean, 0 to 1 range, enum, number). Bad input is a 400. See the hardening section for inputs that used to slip through.
 - Requests go into a bounded queue. One writer takes whatever is waiting, up to `INGEST_BATCH_SIZE`, and commits it as one transaction. Batches grow by themselves under load; there is no flush timer.
-- One writer means journal id order equals commit order.
+- One writer means journal id order equals commit order. (Phase 6 replaced this with one lane per device group plus a dedicated lane for falls; see below.)
 - If the queue stays full for `INGEST_ENQUEUE_TIMEOUT_MS`, the request gets 503 with `Retry-After`. Storage failure is also 503. Both are safe to retry.
 - Inside a batch, the first event for an identity wins; later copies are duplicates, later different content is a conflict.
 
@@ -131,7 +131,27 @@ Results on a 2 vCPU sandbox, with the service, PostgreSQL and the load tool shar
 
 In the second run the service was offered about four times what the machine can do. Nothing was refused and no alarm was lost or late: the 137,837 events not sent are ones the tool had no free connection for. In both runs the journal row count equals the accepted count.
 
-The 50,000 events/s figure needs a machine where the load tool is not competing with the service for two cores.
+### On an 8-core Windows PC with Docker Desktop (15 Nov 2026)
+
+Challenge shape: 5,000/s baseline with a 30 s burst at 50,000/s, 1,000 senders, 60 s. Service and PostgreSQL run in Docker's Linux VM (4 CPUs).
+
+| Where the load tool ran | Accepted | Refused | Request p95 | Fall to feed p95 | Falls missing |
+|---|---|---|---|---|---|
+| On Windows, through Docker's port proxy | 262,650 (4,376/s average) | 0 | 379 ms | 511 ms | 0 of 3,451 |
+| In a container on Docker's network | 496,413 (8,272/s average, about 11,500/s during the burst) | 0 | 114 ms | 119 ms | 0 of 6,423 |
+
+Findings from these runs:
+
+- Docker Desktop's Windows port proxy roughly halves throughput. Measure from inside Docker's network.
+- The service's own metrics showed where the time went: 1,393 batches averaging 189 events took 44 ms each, and the single writer was busy for the whole run. Requests spent their time waiting for that writer, not in HTTP handling.
+- The burst target was not met: about 11,500/s against 50,000/s. Nothing was refused or lost, and alarms stayed far inside one second, because the falls are not behind that backlog.
+
+### What was changed because of it
+
+- **One statement per batch.** A batch used four round trips: begin, insert, read back every row to see which were new, commit. The insert now returns the identities it inserted, in a single atomic statement, and the stored hash is only looked up for events that were already journaled (retries). On the sandbox, the same load went from 9,800/s to 14,900/s.
+- **Parallel writers.** Ordinary events are spread over `INGEST_WRITERS` lanes by device, so PostgreSQL can work on several batches at once and each device's events still commit in order. Fall warnings keep a lane and a writer of their own. That writer is the only one that creates alarms, which keeps alarm ids becoming visible in increasing order for the feed cursor. The 2-core sandbox shows no gain from this (it has no spare core); the 8-core PC should.
+
+The rerun on the PC with these changes is pending.
 
 ## Run
 
