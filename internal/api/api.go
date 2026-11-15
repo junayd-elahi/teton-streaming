@@ -129,8 +129,9 @@ func parseEvent(body io.Reader, received time.Time) (store.Event, error) {
 	if raw == nil {
 		return store.Event{}, errors.New("body must be a json object")
 	}
-	if dec.More() {
-		return store.Event{}, errors.New("body must hold exactly one json object")
+	var extra any
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		return store.Event{}, errors.New("body must hold exactly one complete json object within the size limit")
 	}
 	if err := validateStorable(raw); err != nil {
 		return store.Event{}, err
@@ -183,6 +184,16 @@ func parseEvent(body io.Reader, received time.Time) (store.Event, error) {
 	}
 	payload := bytes.TrimSpace(canonical.Bytes())
 	hash := sha256.Sum256(payload)
+	// Preserve the original canonical-input hash for retry compatibility.
+	// PostgreSQL rejects extreme exponents even on mathematical zero. Store
+	// those zero exponent forms as plain zero after hashing the input.
+	if normalizeZeroExponents(raw) {
+		canonical.Reset()
+		if err := enc.Encode(raw); err != nil {
+			return store.Event{}, err
+		}
+		payload = bytes.TrimSpace(canonical.Bytes())
+	}
 
 	return store.Event{
 		DeviceID:    deviceID,
@@ -194,6 +205,38 @@ func parseEvent(body io.Reader, received time.Time) (store.Event, error) {
 		PayloadHash: hash[:],
 		ReceivedAt:  received.UTC(),
 	}, nil
+}
+
+// normalizeZeroExponents keeps zero's value while avoiding jsonb exponent
+// limits. It runs only after validation and input hashing.
+func normalizeZeroExponents(value any) bool {
+	changed := false
+	switch v := value.(type) {
+	case map[string]any:
+		for key, item := range v {
+			if number, ok := item.(json.Number); ok && zeroExponent(number) {
+				v[key] = json.Number("0")
+				changed = true
+			} else if normalizeZeroExponents(item) {
+				changed = true
+			}
+		}
+	case []any:
+		for i, item := range v {
+			if number, ok := item.(json.Number); ok && zeroExponent(number) {
+				v[i] = json.Number("0")
+				changed = true
+			} else if normalizeZeroExponents(item) {
+				changed = true
+			}
+		}
+	}
+	return changed
+}
+
+func zeroExponent(number json.Number) bool {
+	literal := string(number)
+	return strings.ContainsAny(literal, "eE") && !strings.ContainsAny(mantissa(literal), "123456789")
 }
 
 // validateTypeFields checks the one extra field each event type carries.

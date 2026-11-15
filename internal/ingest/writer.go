@@ -48,15 +48,17 @@ type request struct {
 
 // Writer runs Writers lanes for ordinary events and one lane for fall warnings.
 //
-// A device always maps to the same ordinary lane, so its events are committed
-// in the order they arrived, and several lanes let PostgreSQL work on several
-// batches at once.
+// A device always maps to the same ordinary lane, so its ordinary events keep
+// lane enqueue order. Concurrent requests and the separate fall lane do not
+// establish global event-time order. Several lanes let PostgreSQL work on
+// several batches at once.
 //
 // Fall warnings never share a lane with anything else. They are committed by
-// their own writer as soon as they arrive, so a burst of other events cannot
-// delay an alarm or cause one to be refused. That writer is also the only one
-// that creates alarms, which is what keeps alarm ids becoming visible in
-// increasing order for the feed cursor.
+// their own writer without ordinary batching delay. Ordinary events cannot
+// consume their queue capacity, but database contention and queued falls can
+// still delay them. In the supported single-instance deployment this is the
+// only writer that creates alarms, keeping their ids visible in increasing
+// order for the feed cursor.
 type Writer struct {
 	journal  Journal
 	cfg      Config

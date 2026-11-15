@@ -11,7 +11,8 @@ import (
 
 type feedPage struct {
 	Alarms []struct {
-		EventID string `json:"event_id"`
+		DeviceID string `json:"device_id"`
+		Seq      int64  `json:"seq"`
 	} `json:"alarms"`
 	NextCursor int64 `json:"next_cursor"`
 }
@@ -60,8 +61,8 @@ func followFeed(client *http.Client, target string, cursor int64, prefix string,
 		}
 		now := time.Now()
 		for _, a := range page.Alarms {
-			if strings.HasPrefix(a.EventID, prefix) {
-				falls.delivered(a.EventID, now)
+			if strings.HasPrefix(a.DeviceID, prefix) {
+				falls.delivered(eventID(a.DeviceID, a.Seq), now)
 			}
 		}
 		cursor = page.NextCursor
@@ -69,7 +70,8 @@ func followFeed(client *http.Client, target string, cursor int64, prefix string,
 }
 
 // fallTracker matches each fall this run sent to its arrival on the feed.
-// The service names an alarm "<device_id>:<seq>" after the event that created it.
+// Devices and sequences are unique within a run. Correlate those event fields
+// independently of the service's public event_id format.
 type fallTracker struct {
 	mu          sync.Mutex
 	sentAt      map[string]time.Time

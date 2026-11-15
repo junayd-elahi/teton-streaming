@@ -9,11 +9,12 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/junayd-elahi/teton-streaming/internal/api"
 	"github.com/junayd-elahi/teton-streaming/internal/ingest"
@@ -28,10 +29,11 @@ const heartbeat = `{"device_id":"dev_0001","room_id":"room_001","type":"heartbea
 
 // service is one running instance: store, writer and HTTP server.
 type service struct {
-	store      *store.Store
-	writer     *ingest.Writer
-	srv        *httptest.Server
-	stopWriter context.CancelFunc
+	databaseURL string
+	store       *store.Store
+	writer      *ingest.Writer
+	srv         *httptest.Server
+	stopWriter  context.CancelFunc
 	// clock is the time the service believes it is. Tests move it.
 	clock time.Time
 	// dropNextResponse makes the server process the next request fully and then
@@ -42,10 +44,7 @@ type service struct {
 // startService opens a fresh store, writer and HTTP server, as a process start would.
 func startService(t *testing.T) *service {
 	t.Helper()
-	url := os.Getenv("DATABASE_URL")
-	if url == "" {
-		t.Fatal("DATABASE_URL is required for integration tests")
-	}
+	url := isolatedDatabaseURL(t)
 	ctx := context.Background()
 	st, err := store.Open(ctx, url)
 	if err != nil {
@@ -66,7 +65,7 @@ func startService(t *testing.T) *service {
 	}, m)
 	go writer.Run(writerCtx)
 
-	svc := &service{store: st, writer: writer, stopWriter: stopWriter, clock: fixedNow}
+	svc := &service{databaseURL: url, store: st, writer: writer, stopWriter: stopWriter, clock: fixedNow}
 	handler := api.New(writer, st, m, func() time.Time { return svc.clock }).Handler()
 	svc.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !svc.dropNextResponse {
@@ -133,7 +132,12 @@ func count(t *testing.T, svc *service) int64 {
 
 func reset(t *testing.T, svc *service) {
 	t.Helper()
-	if err := svc.store.Reset(context.Background()); err != nil {
+	conn, err := pgx.Connect(context.Background(), svc.databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(context.Background())
+	if _, err := conn.Exec(context.Background(), `TRUNCATE event_log, alarms RESTART IDENTITY`); err != nil {
 		t.Fatal(err)
 	}
 }

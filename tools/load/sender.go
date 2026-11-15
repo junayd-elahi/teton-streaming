@@ -138,6 +138,12 @@ func (s *sender) send(e event) {
 			s.stats.TransportErr++
 		case status == http.StatusOK && duplicate:
 			s.stats.Duplicate++
+			// An earlier attempt may have committed before its response was
+			// lost. Its duplicate acknowledgement still proves this run's
+			// fall is durable and must be checked for feed delivery.
+			if e.isFall && attempt > 0 {
+				s.falls.accepted(e.deviceID, e.seq)
+			}
 		case status == http.StatusOK:
 			s.stats.Accepted++
 			if e.isFall {

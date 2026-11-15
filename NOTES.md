@@ -129,7 +129,7 @@ Results on a 2 vCPU sandbox, with the service, PostgreSQL and the load tool shar
 | Unpaced, 256 senders, 15 s | 119,086 | 119,086 (7,934/s) | 0 | 71 ms | 75 ms | 0 of 1,574 |
 | 3,000/s with an 8 s burst at 30,000/s, 1,000 senders, 20 s | 276,000 | 138,163 (6,906/s) | 0 | 120 ms | 128 ms | 0 of 1,795 |
 
-In the second run the service was offered about four times what the machine can do. Nothing was refused and no alarm was lost or late: the 137,837 events not sent are ones the tool had no free connection for. In both runs the journal row count equals the accepted count.
+In the second run the tool scheduled substantially more events than it sent. The 137,837 unsent events never reached the service because the tool had no free sender. No sent request was refused and no acknowledged alarm was missing in the observation window. In both runs the journal row count equals the accepted count. This does not establish service behavior at the full scheduled arrival rate.
 
 ### On an 8-core Windows PC with Docker Desktop (15 Nov 2026)
 
@@ -144,12 +144,12 @@ Findings from these runs:
 
 - Docker Desktop's Windows port proxy roughly halves throughput. Measure from inside Docker's network.
 - The service's own metrics showed where the time went: 1,393 batches averaging 189 events took 44 ms each, and the single writer was busy for the whole run. Requests spent their time waiting for that writer, not in HTTP handling.
-- The burst target was not met: about 11,500/s against 50,000/s. Nothing was refused or lost, and alarms stayed far inside one second, because the falls are not behind that backlog.
+- The burst target was not met: about 11,500/s against 50,000/s. No sent request was refused and no acknowledged alarm was missing. The reported alarm times include the load tool's original shared connection pool; confirm them using the corrected listener before making an alarm-latency claim.
 
 ### What was changed because of it
 
 - **One statement per batch.** A batch used four round trips: begin, insert, read back every row to see which were new, commit. The insert now returns the identities it inserted, in a single atomic statement, and the stored hash is only looked up for events that were already journaled (retries). On the sandbox, the same load went from 9,800/s to 14,900/s.
-- **Parallel writers.** Ordinary events are spread over `INGEST_WRITERS` lanes by device, so PostgreSQL can work on several batches at once and each device's events still commit in order. Fall warnings keep a lane and a writer of their own. That writer is the only one that creates alarms, which keeps alarm ids becoming visible in increasing order for the feed cursor. The 2-core sandbox shows no gain from this (it has no spare core); the 8-core PC should.
+- **Parallel writers.** Ordinary events are spread over `INGEST_WRITERS` lanes by device, so PostgreSQL can work on several batches at once. Ordinary events retain lane enqueue order; concurrent requests and the separate fall lane do not establish global per-device event-time order. Fall warnings keep a lane and a writer of their own. That writer is the only one that creates alarms, which keeps alarm ids becoming visible in increasing order for the feed cursor in the supported single-instance deployment. The 2-core sandbox showed no throughput gain; the PC rerun below also showed no gain.
 
 ### Rerun on the PC after those changes
 
@@ -157,10 +157,10 @@ Findings from these runs:
 |---|---|---|---|---|---|
 | In Docker's network, 2,000 senders | 484,727 (8,078/s average, about 11,200/s during the burst) | 0 | 338 ms | 67 ms / 280 ms | 0 of 6,446 |
 
-Throughput did not move, so on this machine the writers were no longer the limit. The service's metrics for the run:
+Throughput did not move after adding writer lanes. This suggests another shared resource limits this setup, but does not isolate the bottleneck. The service's metrics for the run:
 
 - 53,369 batches averaging 9 events, 4.75 ms each. The database was being handed many tiny batches.
-- A request took 82 ms on average inside the service, of which 24 ms was waiting in a queue and 5 ms was the commit. The other 53 ms was time waiting for a CPU: the VM's four CPUs are shared by PostgreSQL, the service and a load tool holding 2,000 connections.
+- A request took 82 ms on average inside the service, of which 24 ms was waiting in a queue and 5 ms was the commit. The remaining 53 ms was not attributed by these measurements. CPU contention is plausible because the VM's four CPUs are shared by PostgreSQL, the service and a load tool holding 2,000 connections; profiling is needed to establish that explanation.
 - Falls reached the feed faster than ordinary requests completed (67 ms against 119 ms at the median), which is the dedicated fall writer doing its job.
 
 One more change followed from the tiny batches: ordinary lanes now wait up to `INGEST_LINGER_MS` (5 ms) for a batch to fill, because a commit costs one statement and one disk flush whatever its size. On the sandbox this cut total database commit time for the same load by 30% (91 s to 64 s) with unchanged throughput, since the CPU is the limit there too. The fall lane never lingers.
@@ -181,7 +181,17 @@ So this run does not show what the service can do on eight cores. The best measu
 
 ### Where this leaves the burst target
 
-Measured ceiling on an 8-core Windows PC, everything inside Docker Desktop's 4-CPU VM including the load generator: about 11,000 events/s, against a 50,000 events/s target. At roughly four times overload, nothing was refused, every acknowledged event was journaled, no alarm was lost, and alarms arrived in 119 to 280 ms at the 95th percentile. The limit is CPU shared with the load generator, and one HTTP request per event. A fair test of the target needs the load generator on a separate machine.
+Best measured burst rate on an 8-core Windows PC, everything inside Docker Desktop's 4-CPU VM including the load generator: about 11,000 events/s, against a 50,000 events/s target. Scheduled work that the generator did not send is not service overload. No sent request was refused, every acknowledged event was journaled, and no acknowledged alarm was missing in these runs. Earlier 119 to 280 ms alarm p95 figures need confirmation with the separate listener connection pool. Shared CPU and the one-request-per-event workload are possible constraints; the service's independent ceiling has not been established. A fairer test uses a separate load-generator machine.
+
+### Independent candidate confirmation (15 Nov 2026)
+
+A local hardening candidate based on `fe1a52c9e25344446938facc8c65efedb16dd681` preserves the separate feed-client pool, four ordinary writer lanes, the dedicated fall lane, and 5 ms ordinary linger. Server, PostgreSQL 16.2 and the load tool shared a Linux environment whose Go runtime reported nine CPUs; this is not a controlled comparison with the Windows PC.
+
+In a separate 30-second target phase with 2,000 senders and 5,000 devices, the tool scheduled 1,500,000 events at 50,000/s. It sent and received acceptance for 1,371,706; 128,294 were never sent. Observed accepted throughput was 45,637/s over 30.057 seconds. No sent request returned an HTTP error or a transport error. All 17,739 acknowledged falls appeared on the feed, with no duplicate observations; first-send-to-feed p95 was 33.531 ms. Request-attempt p95 was 74.042 ms.
+
+Database row deltas matched both accepted events and accepted falls and remained unchanged after a hard API-process kill. The database itself was not killed. This is not a disk-failure or backup/restore test.
+
+The explicit full-offer validation failed and the load CLI exited nonzero. The 50,000/s target remains unmet. This isolated target phase does not replace the complete baseline, repeated bursts, offline replay and recovery scenario, and establishes no interview score.
 
 ## Run
 

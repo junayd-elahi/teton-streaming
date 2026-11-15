@@ -26,17 +26,17 @@ Work in progress.
 ## How ingestion works
 
 1. `POST /events` validates the envelope, the type-specific field and the timestamp. An event dated more than one hour ahead is rejected.
-2. Valid events go into bounded queues, one per writer, chosen by device so a device's events stay in order. Each writer takes whatever is waiting, up to a batch limit, and commits it as one atomic statement.
+2. Valid events go into bounded queues, one per ordinary writer, chosen by device so ordinary events retain lane enqueue order. Each writer takes whatever is waiting, up to a batch limit, and commits it as one atomic statement.
 3. The request is answered only after its batch commits, so a `200` means the event is on disk.
 4. `(device_id, seq, ts)` identifies an event. Sending the same event again returns `200` with `"duplicate": true` and changes nothing. Reusing the identity with different content returns `409`.
 5. If the queue stays full, the request gets `503` with `Retry-After`. Retrying is always safe.
-6. Fall warnings have their own queue and their own writer, so a burst of heartbeats cannot delay or crowd out an alarm.
+6. Fall warnings have a dedicated queue and writer, so ordinary events cannot consume their queue capacity. Database contention and queued falls can still delay an alarm.
 
 ## How the reads work
 
 Health and occupancy are computed at read time from the journal, by the device's own event time, so a late or replayed event corrects the past without any extra step.
 
-- **Health:** the share of the last 300 one-second slots that contain a heartbeat, measured on the device's own clock so that clock drift does not make a healthy device look unhealthy.
+- **Health:** the share of the last 300 one-second slots that contain a heartbeat. Clock calibration uses the most recently received sample within 60 seconds of receipt, with zero offset when none qualifies. Older replay and large future outliers cannot move the window. Delay within that bound remains indistinguishable from clock error, so this is a coverage estimate.
 - **Occupancy:** occupied time integrated from presence transitions and clipped to the window. Time before a room's first known state is reported as `unknown_seconds`, not counted as empty.
 
 ```bash
@@ -48,8 +48,12 @@ curl "localhost:8080/rooms/room_001/occupancy?window=5m"
 
 A sensor can report one fall several times. Reports with the same device, room, timestamp and confidence become one alarm, created in the same transaction as the event, so an acknowledged fall always has its alarm.
 
-- `GET /alarms?since=0` returns all alarms ordered by event time. `since` filters by when the fall was received, so late falls are not missed.
+- `GET /alarms?since=0` returns all alarms ordered by event time. `since` filters by receipt time. Use `after_id` for reliable resume across concurrent commits.
 - `GET /alarms?after_id=<cursor>&wait=10` is the live feed. It answers as soon as a new alarm commits, or with an empty list after the wait. Pass the returned `next_cursor` as `after_id` next time. The cursor survives disconnects and restarts, and a fall that arrives late is still delivered.
+
+Public `event_id` values are persisted. Migration 006 preserves identifiers already published by older builds; new alarms receive unique identifiers even after a device sequence resets. Previously colliding legacy identifiers remain unchanged. `alarm_id` is the stable database cursor for consumer deduplication.
+
+Run one service instance. Stop the old instance before starting an upgraded build and its migrations. Mixed-version rolling deployment is unsupported because older builds derive different identifiers for newly created alarms.
 
 ## Operating it
 
@@ -63,7 +67,7 @@ Go (standard `net/http`, `pgx`) and PostgreSQL 16. One service, one database.
 
 ## Run it
 
-Needs Go 1.24+ and Docker.
+Needs Go 1.26.11+ and Docker. The Compose service is exposed on localhost for trusted local evaluation. External deployment needs an authenticated, encrypted access boundary and a deployment-specific access policy.
 
 ```bash
 docker compose up -d db
@@ -80,6 +84,8 @@ curl -d '{"device_id":"dev_0001","room_id":"room_001","type":"heartbeat","ts":"'
 ## Test it
 
 The integration tests need the database running:
+
+Each test creates and removes its own random schema and reuses it across same-test restarts. The supplied database account needs schema-creation permission. Application tables in other schemas are preserved.
 
 ```bash
 go test -race -count=1 -p 1 ./...
@@ -102,10 +108,12 @@ go run ./tools/load -senders 1000 -duration 60s -rate 5000 -burst-rate 50000 -bu
 On Docker Desktop for Windows, run it inside Docker's network, because the Windows port proxy roughly halves throughput:
 
 ```bash
-docker run --rm --network teton-streaming_default -v "${PWD}:/src" -w /src golang:1.24 go run ./tools/load -target http://server:8080 -senders 2000 -duration 60s -rate 5000 -burst-rate 50000 -burst-start 15s -burst-duration 30s
+docker run --rm --network teton-streaming_default -v "${PWD}:/src" -w /src golang:1.26.11 go run ./tools/load -target http://server:8080 -senders 2000 -duration 60s -rate 5000 -burst-rate 50000 -burst-start 15s -burst-duration 30s
 ```
 
 Leave out `-rate` to send as fast as the service answers. Results so far are in `NOTES.md`.
+
+Default load runs report diagnostic measurements. Add `-require-full-offer -require-no-loss` to fail when scheduled events were unsent or acknowledged falls were missing. Optional `-min-accepted-rate`, `-max-request-p95-ms` and `-max-fall-p95-ms` check explicit aggregate thresholds. Percentiles currently aggregate the run; measure the burst separately before making a burst-p95 claim. Request percentiles cover response attempts, while fall percentiles cover first send to feed observation.
 
 ## Layout
 

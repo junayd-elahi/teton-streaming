@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"math"
 	"os"
 	"runtime"
 	"sync"
@@ -22,15 +23,20 @@ import (
 )
 
 type config struct {
-	Target        string        `json:"target"`
-	Senders       int           `json:"senders"`
-	Devices       int           `json:"devices"`
-	Duration      time.Duration `json:"duration_ns"`
-	Rate          float64       `json:"rate"`
-	BurstRate     float64       `json:"burst_rate"`
-	BurstStart    time.Duration `json:"burst_start_ns"`
-	BurstDuration time.Duration `json:"burst_duration_ns"`
-	Retries       int           `json:"retries"`
+	Target           string        `json:"target"`
+	Senders          int           `json:"senders"`
+	Devices          int           `json:"devices"`
+	Duration         time.Duration `json:"duration_ns"`
+	Rate             float64       `json:"rate"`
+	BurstRate        float64       `json:"burst_rate"`
+	BurstStart       time.Duration `json:"burst_start_ns"`
+	BurstDuration    time.Duration `json:"burst_duration_ns"`
+	Retries          int           `json:"retries"`
+	RequireFullOffer bool          `json:"require_full_offer"`
+	RequireNoLoss    bool          `json:"require_no_loss"`
+	MinAcceptedRate  float64       `json:"min_accepted_rate"`
+	MaxRequestP95MS  float64       `json:"max_request_p95_ms"`
+	MaxFallP95MS     float64       `json:"max_fall_p95_ms"`
 }
 
 func main() {
@@ -45,13 +51,36 @@ func main() {
 	flag.DurationVar(&cfg.BurstStart, "burst-start", 0, "when the burst begins")
 	flag.DurationVar(&cfg.BurstDuration, "burst-duration", 0, "how long the burst lasts")
 	flag.IntVar(&cfg.Retries, "retries", 0, "retries of a 503 or transport error, same event")
+	flag.BoolVar(&cfg.RequireFullOffer, "require-full-offer", false, "validation: fail if paced offers are not all sent")
+	flag.BoolVar(&cfg.RequireNoLoss, "require-no-loss", false, "validation: fail if an accepted fall is missing from the feed")
+	flag.Float64Var(&cfg.MinAcceptedRate, "min-accepted-rate", 0, "validation: minimum accepted events/s; 0 disables this check")
+	flag.Float64Var(&cfg.MaxRequestP95MS, "max-request-p95-ms", 0, "validation: maximum request p95 in milliseconds; 0 disables this check")
+	flag.Float64Var(&cfg.MaxFallP95MS, "max-fall-p95-ms", 0, "validation: maximum fall post-to-feed p95 in milliseconds; 0 disables this check")
 	flag.StringVar(&jsonPath, "json", "", "also write the report to this file as JSON")
 	flag.Parse()
+	if cfg.Senders <= 0 || cfg.Devices <= 0 || cfg.Duration <= 0 {
+		fatal("-senders, -devices, and -duration must be positive")
+	}
+	if cfg.Retries < 0 {
+		fatal("-retries must be non-negative")
+	}
+	if math.IsNaN(cfg.Rate) || math.IsInf(cfg.Rate, 0) || cfg.Rate < 0 ||
+		math.IsNaN(cfg.BurstRate) || math.IsInf(cfg.BurstRate, 0) || cfg.BurstRate < 0 {
+		fatal("-rate and -burst-rate must be finite and non-negative")
+	}
+	if cfg.BurstStart < 0 || cfg.BurstDuration < 0 {
+		fatal("-burst-start and -burst-duration must be non-negative")
+	}
 	if cfg.Devices < cfg.Senders {
 		cfg.Devices = cfg.Senders // every sender owns at least one device
 	}
 	if cfg.BurstRate > 0 && cfg.Rate == 0 {
 		fatal("-burst-rate needs -rate")
+	}
+	if math.IsNaN(cfg.MinAcceptedRate) || math.IsInf(cfg.MinAcceptedRate, 0) || cfg.MinAcceptedRate < 0 ||
+		math.IsNaN(cfg.MaxRequestP95MS) || math.IsInf(cfg.MaxRequestP95MS, 0) || cfg.MaxRequestP95MS < 0 ||
+		math.IsNaN(cfg.MaxFallP95MS) || math.IsInf(cfg.MaxFallP95MS, 0) || cfg.MaxFallP95MS < 0 {
+		fatal("validation thresholds must be finite and non-negative")
 	}
 
 	client := newClient(cfg.Senders)
@@ -94,6 +123,7 @@ func main() {
 	<-feedDone
 
 	report := buildReport(cfg, started, elapsed, results, notSent(), falls)
+	report.evaluateValidation()
 	report.print(os.Stdout)
 	if jsonPath != "" {
 		raw, err := json.MarshalIndent(report, "", "  ")
@@ -106,6 +136,9 @@ func main() {
 	}
 	if !report.Reconciles {
 		fatal("the counts do not add up")
+	}
+	if report.ValidationRequested && !report.ValidationPassed {
+		fatal("requested validation failed")
 	}
 }
 

@@ -1,8 +1,8 @@
 package api
 
 import (
+	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"math"
 	"net/http"
@@ -41,7 +41,9 @@ func (s *Server) getAlarmSnapshot(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
-	alarms, err := s.store.AlarmsSince(r.Context(), since)
+	ctx, cancel := context.WithTimeout(r.Context(), readQueryTimeout)
+	defer cancel()
+	alarms, err := s.store.AlarmsSince(ctx, since)
 	if err != nil {
 		s.metrics.ReadErrors.Inc()
 		slog.Error("alarm snapshot query failed", "err", err)
@@ -77,18 +79,40 @@ func (s *Server) getAlarmFeed(w http.ResponseWriter, r *http.Request) {
 
 	deadline := time.NewTimer(wait)
 	defer deadline.Stop()
+	budget := readQueryTimeout
+	if wait > 0 {
+		budget = wait
+	}
+	feedCtx, cancel := context.WithTimeout(r.Context(), budget)
+	defer cancel()
+	// Notifications accelerate reads; committed database rows remain the
+	// source of truth if a notification is lost after an ambiguous response.
+	var poll <-chan time.Time
+	if wait > 0 {
+		ticker := time.NewTicker(200 * time.Millisecond)
+		defer ticker.Stop()
+		poll = ticker.C
+	}
 	s.metrics.FeedWaiters.Add(1)
 	defer s.metrics.FeedWaiters.Add(-1)
+	hadSuccessfulRead := false
 	for {
 		// Take the signal before querying so a commit in between still wakes us.
 		newAlarms := s.writer.NewAlarms()
-		alarms, err := s.store.AlarmsAfter(r.Context(), cursor, feedPageLimit)
+		queryCtx, cancelQuery := context.WithTimeout(feedCtx, readQueryTimeout)
+		alarms, err := s.store.AlarmsAfter(queryCtx, cursor, feedPageLimit)
+		cancelQuery()
 		if err != nil {
+			if hadSuccessfulRead && wait > 0 && errors.Is(feedCtx.Err(), context.DeadlineExceeded) {
+				writeJSON(w, http.StatusOK, map[string]any{"alarms": []any{}, "next_cursor": cursor})
+				return
+			}
 			s.metrics.ReadErrors.Inc()
 			slog.Error("alarm feed query failed", "err", err)
 			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable, retry"})
 			return
 		}
+		hadSuccessfulRead = true
 		if len(alarms) > 0 {
 			writeJSON(w, http.StatusOK, map[string]any{
 				"alarms":      alarmObjects(alarms),
@@ -98,6 +122,7 @@ func (s *Server) getAlarmFeed(w http.ResponseWriter, r *http.Request) {
 		}
 		select {
 		case <-newAlarms:
+		case <-poll:
 		case <-deadline.C:
 			writeJSON(w, http.StatusOK, map[string]any{"alarms": []any{}, "next_cursor": cursor})
 			return
@@ -127,13 +152,13 @@ func parseSince(raw string) (time.Time, error) {
 
 // alarmObjects returns the fields Teton's evaluator documents (event_id,
 // room_id, ts, confidence), the rest of the original fall_warn event, and the
-// feed cursor and receipt time. event_id is the identity of the first event
-// seen for the fall: "<device_id>:<seq>".
+// feed cursor and receipt time. Public event ids are persisted. The migration
+// preserves previously published ids; new alarms receive unique ids.
 func alarmObjects(alarms []store.Alarm) []map[string]any {
 	objects := make([]map[string]any, len(alarms))
 	for i, a := range alarms {
 		objects[i] = map[string]any{
-			"event_id":    fmt.Sprintf("%s:%d", a.DeviceID, a.Seq),
+			"event_id":    a.EventID,
 			"alarm_id":    a.ID,
 			"device_id":   a.DeviceID,
 			"room_id":     a.RoomID,

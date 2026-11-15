@@ -214,12 +214,14 @@ func (s *Store) AppendBatch(ctx context.Context, events []Event) (BatchResult, e
 	if len(earlier) > 0 {
 		stored, err := s.storedHashes(ctx, events, earlier)
 		if err != nil {
-			return BatchResult{}, err
+			// The insertion statement has already committed. Preserve its
+			// alarm count so callers still wake feed readers on lookup failure.
+			return BatchResult{NewAlarms: newAlarms}, err
 		}
 		for _, i := range earlier {
 			hash, ok := stored[identityOf(events[i])]
 			if !ok {
-				return BatchResult{}, fmt.Errorf("event %s/%d neither inserted nor already journaled",
+				return BatchResult{NewAlarms: newAlarms}, fmt.Errorf("event %s/%d neither inserted nor already journaled",
 					events[i].DeviceID, events[i].Seq)
 			}
 			outcomes[i] = compareHashes(hash, events[i].PayloadHash)
@@ -283,12 +285,6 @@ func (s *Store) CountEvents(ctx context.Context) (int64, error) {
 	return n, err
 }
 
-// Reset empties the journal and alarms. Used by integration tests only.
-func (s *Store) Reset(ctx context.Context) error {
-	_, err := s.pool.Exec(ctx, `TRUNCATE event_log, alarms RESTART IDENTITY`)
-	return err
-}
-
 // HeartbeatWindow is the length of the device availability window.
 const HeartbeatWindow = 300 * time.Second
 
@@ -302,35 +298,37 @@ type DeviceHealth struct {
 // DeviceHealth counts heartbeats over the device's own last five minutes.
 //
 // Device clocks drift, so "now" on the server is not "now" on the device. The
-// offset is estimated from the device's latest heartbeat as its timestamp
-// minus the time the server received it. The window is then
+// Offset is estimated from the most recently received heartbeat within 60
+// seconds of receipt. Larger differences are excluded from calibration so old
+// replay and large future outliers do not move the window. With no credible
+// sample the offset is zero. Delays within the bound remain indistinguishable
+// from clock skew. The window is
 // (deviceNow - 300s, deviceNow] in device time, and Slots is the number of
 // distinct one-second slots in it that hold a heartbeat, counted back from
 // deviceNow so there are exactly 300. A device that stopped sending keeps its
 // last known offset, so its window keeps moving and empties as time passes.
 func (s *Store) DeviceHealth(ctx context.Context, deviceID string, at time.Time) (DeviceHealth, error) {
 	var h DeviceHealth
-	var last, received time.Time
+	var offsetSeconds float64
 	err := s.pool.QueryRow(ctx, `
-		SELECT ts, received_at FROM event_log
-		WHERE type = 'heartbeat' AND device_id = $1
-		ORDER BY ts DESC
-		LIMIT 1`, deviceID).Scan(&last, &received)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return h, nil
-	}
-	if err != nil {
-		return h, err
-	}
-	h.LastHeartbeat = &last
-	h.ClockOffset = last.Sub(received)
-	deviceNow := at.Add(h.ClockOffset)
-	err = s.pool.QueryRow(ctx, `
-		SELECT count(DISTINCT floor(extract(epoch FROM ($2::timestamptz - ts))))
-		FROM event_log
-		WHERE type = 'heartbeat' AND device_id = $1
-		  AND ts > $2::timestamptz - make_interval(secs => $3) AND ts <= $2`,
-		deviceID, deviceNow, HeartbeatWindow.Seconds()).Scan(&h.Slots)
+        WITH clock_sample AS (
+            SELECT ts - received_at AS clock_offset FROM event_log
+            WHERE type = 'heartbeat' AND device_id = $1
+              AND (ts - received_at) BETWEEN INTERVAL '-60 seconds' AND INTERVAL '60 seconds'
+            ORDER BY received_at DESC, ts DESC, id DESC LIMIT 1
+        ), device_clock AS (
+            SELECT $2::timestamptz + COALESCE(
+                (SELECT clock_offset FROM clock_sample), INTERVAL '0 seconds') AS device_now
+        )
+        SELECT
+            (SELECT max(ts) FROM event_log WHERE type = 'heartbeat' AND device_id = $1),
+            extract(epoch FROM COALESCE((SELECT clock_offset FROM clock_sample), INTERVAL '0 seconds'))::float8,
+            (SELECT count(DISTINCT floor(extract(epoch FROM (c.device_now - e.ts))))
+             FROM event_log e CROSS JOIN device_clock c
+             WHERE e.type = 'heartbeat' AND e.device_id = $1
+               AND e.ts > c.device_now - make_interval(secs => $3) AND e.ts <= c.device_now)`,
+		deviceID, at, HeartbeatWindow.Seconds()).Scan(&h.LastHeartbeat, &offsetSeconds, &h.Slots)
+	h.ClockOffset = time.Duration(offsetSeconds * float64(time.Second))
 	return h, err
 }
 
@@ -339,41 +337,47 @@ func (s *Store) DeviceHealth(ctx context.Context, deviceID string, at time.Time)
 // then device_id, then seq. Transitions dated ahead of the server clock are
 // included: the latest presence event decides the room's current state.
 func (s *Store) PresenceTimeline(ctx context.Context, roomID string, start time.Time) (*aggregation.Transition, []aggregation.Transition, error) {
-	var predecessor *aggregation.Transition
-	var p aggregation.Transition
-	err := s.pool.QueryRow(ctx, `
-		SELECT ts, (payload->>'in_room')::boolean FROM event_log
-		WHERE type = 'presence' AND room_id = $1 AND ts <= $2
-		ORDER BY ts DESC, device_id DESC, seq DESC
-		LIMIT 1`, roomID, start).Scan(&p.At, &p.InRoom)
-	switch {
-	case err == nil:
-		predecessor = &p
-	case !errors.Is(err, pgx.ErrNoRows):
-		return nil, nil, err
-	}
-
+	// One statement gives predecessor and transitions the same MVCC snapshot.
 	rows, err := s.pool.Query(ctx, `
-		SELECT ts, (payload->>'in_room')::boolean FROM event_log
-		WHERE type = 'presence' AND room_id = $1 AND ts > $2
-		ORDER BY ts, device_id, seq`, roomID, start)
+        WITH previous AS (
+            SELECT ts, (payload->>'in_room')::boolean AS in_room, device_id, seq
+            FROM event_log
+            WHERE type = 'presence' AND room_id = $1 AND ts <= $2
+            ORDER BY ts DESC, device_id DESC, seq DESC LIMIT 1
+        ), timeline AS (
+            SELECT ts, in_room, device_id, seq, true AS predecessor FROM previous
+            UNION ALL
+            SELECT ts, (payload->>'in_room')::boolean, device_id, seq, false
+            FROM event_log
+            WHERE type = 'presence' AND room_id = $1 AND ts > $2
+        )
+        SELECT ts, in_room, predecessor FROM timeline
+        ORDER BY predecessor DESC, ts, device_id, seq`, roomID, start)
 	if err != nil {
 		return nil, nil, err
 	}
-	transitions, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (aggregation.Transition, error) {
-		var t aggregation.Transition
-		err := row.Scan(&t.At, &t.InRoom)
-		return t, err
-	})
-	if err != nil {
-		return nil, nil, err
+	defer rows.Close()
+	var predecessor *aggregation.Transition
+	var transitions []aggregation.Transition
+	for rows.Next() {
+		var transition aggregation.Transition
+		var isPredecessor bool
+		if err := rows.Scan(&transition.At, &transition.InRoom, &isPredecessor); err != nil {
+			return nil, nil, err
+		}
+		if isPredecessor {
+			predecessor = &transition
+		} else {
+			transitions = append(transitions, transition)
+		}
 	}
-	return predecessor, transitions, nil
+	return predecessor, transitions, rows.Err()
 }
 
 // Alarm is one logical fall.
 type Alarm struct {
-	ID         int64 // feed cursor, increasing in commit order
+	ID         int64  // feed cursor, increasing in commit order
+	EventID    string // persisted public identity, stable across application upgrades
 	DeviceID   string
 	RoomID     string
 	TS         time.Time // the device's original event time
@@ -382,17 +386,17 @@ type Alarm struct {
 	ReceivedAt time.Time
 }
 
-const alarmColumns = `id, device_id, room_id, ts, confidence, seq, received_at`
+const alarmColumns = `id, device_id, room_id, ts, confidence, seq, received_at, event_id`
 
 func scanAlarm(row pgx.CollectableRow) (Alarm, error) {
 	var a Alarm
-	err := row.Scan(&a.ID, &a.DeviceID, &a.RoomID, &a.TS, &a.Confidence, &a.Seq, &a.ReceivedAt)
+	err := row.Scan(&a.ID, &a.DeviceID, &a.RoomID, &a.TS, &a.Confidence, &a.Seq, &a.ReceivedAt, &a.EventID)
 	return a, err
 }
 
 // AlarmsSince returns every alarm the service received at or after since,
-// ordered by event time. Filtering on receipt, not event time, means a poller
-// that passes its last poll time still gets a fall that arrived late.
+// ordered by event time. This is a receipt-time snapshot. Use the durable
+// cursor API to resume safely across concurrent commits.
 func (s *Store) AlarmsSince(ctx context.Context, since time.Time) ([]Alarm, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT `+alarmColumns+` FROM alarms WHERE received_at >= $1 ORDER BY ts, id`, since)

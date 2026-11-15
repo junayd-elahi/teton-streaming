@@ -29,7 +29,7 @@ services:
       INGEST_ENQUEUE_TIMEOUT_MS: "2000"
       INGEST_COMMIT_TIMEOUT_MS: "5000"
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     depends_on:
       db:
         condition: service_healthy

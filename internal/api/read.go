@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"time"
@@ -11,6 +12,8 @@ import (
 
 // timestampLayout matches the event schema: UTC, millisecond precision.
 const timestampLayout = "2006-01-02T15:04:05.000Z"
+
+const readQueryTimeout = 5 * time.Second
 
 var occupancyWindows = map[string]time.Duration{
 	"1m": time.Minute,
@@ -24,7 +27,9 @@ var occupancyWindows = map[string]time.Duration{
 // clock and the server's. A device never seen returns null and zeros.
 func (s *Server) getDeviceHealth(w http.ResponseWriter, r *http.Request) {
 	s.metrics.ReadRequests.With("health").Inc()
-	health, err := s.store.DeviceHealth(r.Context(), r.PathValue("device_id"), s.now())
+	ctx, cancel := context.WithTimeout(r.Context(), readQueryTimeout)
+	defer cancel()
+	health, err := s.store.DeviceHealth(ctx, r.PathValue("device_id"), s.now())
 	if err != nil {
 		s.metrics.ReadErrors.Inc()
 		slog.Error("device health query failed", "err", err)
@@ -56,7 +61,9 @@ func (s *Server) getRoomOccupancy(w http.ResponseWriter, r *http.Request) {
 	}
 	end := s.now()
 	start := end.Add(-window)
-	predecessor, transitions, err := s.store.PresenceTimeline(r.Context(), r.PathValue("room_id"), start)
+	ctx, cancel := context.WithTimeout(r.Context(), readQueryTimeout)
+	defer cancel()
+	predecessor, transitions, err := s.store.PresenceTimeline(ctx, r.PathValue("room_id"), start)
 	if err != nil {
 		s.metrics.ReadErrors.Inc()
 		slog.Error("occupancy query failed", "err", err)

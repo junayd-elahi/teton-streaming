@@ -3,6 +3,7 @@ package integration
 import (
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -57,10 +58,52 @@ func TestJitterCopiesProduceOneAlarm(t *testing.T) {
 	if len(page.Alarms) != 1 {
 		t.Fatalf("%d alarms, want 1", len(page.Alarms))
 	}
-	want := alarm{EventID: "dev_f1:10", AlarmID: 1, DeviceID: "dev_f1", RoomID: "room_f", Type: "fall_warn",
+	if !strings.HasPrefix(page.Alarms[0].EventID, "alarm:") {
+		t.Fatal("new alarm lacks a persisted public id")
+	}
+	want := alarm{EventID: page.Alarms[0].EventID, AlarmID: 1, DeviceID: "dev_f1", RoomID: "room_f", Type: "fall_warn",
 		TS: "2026-11-15T11:59:00.000Z", Seq: 10, Confidence: 0.92}
 	if page.Alarms[0] != want {
 		t.Fatalf("got %+v, want %+v", page.Alarms[0], want)
+	}
+}
+
+// Device sequences can restart. Distinct persisted timestamps must produce
+// distinct ids even when their millisecond display timestamps are identical.
+func TestAlarmEventIDsSurviveSequenceResetRetryAndRestart(t *testing.T) {
+	svc := startService(t)
+	reset(t, svc)
+	t.Cleanup(func() { svc.stop() })
+
+	first := fallAt("dev_reset", "room_f", 1, "2026-11-15T11:59:00.000001Z", 0.9)
+	second := fallAt("dev_reset", "room_f", 1, "2026-11-15T11:59:00.000002Z", 0.9)
+	mustPost(t, svc, first)
+	mustPost(t, svc, second)
+	before := alarmsFrom(t, svc, "after_id=0").Alarms
+	if len(before) != 2 {
+		t.Fatalf("%d alarms, want 2", len(before))
+	}
+	if before[0].EventID == before[1].EventID || !strings.HasPrefix(before[0].EventID, "alarm:") || !strings.HasPrefix(before[1].EventID, "alarm:") {
+		t.Fatalf("sequence reset reused public identities: %+v", before)
+	}
+
+	svc.stop()
+	svc = startService(t)
+	for _, body := range []string{first, second} {
+		if got := postReply(t, svc, body); got.status != http.StatusOK || !got.duplicate {
+			t.Fatalf("retry after restart: got %+v, want 200 duplicate", got)
+		}
+	}
+	// A jitter copy must keep the id of the original event for its alarm.
+	mustPost(t, svc, fallAt("dev_reset", "room_f", 2, "2026-11-15T11:59:00.000001Z", 0.9))
+	after := alarmsFrom(t, svc, "after_id=0").Alarms
+	if len(after) != len(before) {
+		t.Fatalf("%d alarms after retry, want %d", len(after), len(before))
+	}
+	for i := range before {
+		if after[i] != before[i] {
+			t.Fatalf("alarm changed across restart/retry: got %+v, want %+v", after[i], before[i])
+		}
 	}
 }
 
