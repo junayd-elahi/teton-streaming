@@ -165,6 +165,20 @@ Throughput did not move, so on this machine the writers were no longer the limit
 
 One more change followed from the tiny batches: ordinary lanes now wait up to `INGEST_LINGER_MS` (5 ms) for a batch to fill, because a commit costs one statement and one disk flush whatever its size. On the sandbox this cut total database commit time for the same load by 30% (91 s to 64 s) with unchanged throughput, since the CPU is the limit there too. The fall lane never lingers.
 
+### Service and load tool run directly on Windows, database still in Docker
+
+Tried to check whether the crowded VM was the limit. It was not a cleaner test:
+
+| Run | Accepted | Transport errors | Request p95 (client) | Request average (inside the service) |
+|---|---|---|---|---|
+| Native Windows, 2,000 senders | 382,148 (6,368/s average) | 728 | 495 ms | 42 ms |
+
+- Throughput went down, not up. Each batch commit now crossed Docker's port proxy to reach the database and took 11.7 ms on average, against 4.75 ms when the service sat next to it.
+- The service answered in 42 ms on average while the client saw 158 ms at the median and some 15 s timeouts. That gap is on the Windows side of the connection, between the load tool and the service, most likely 2,000 connections being opened at once against the listener's backlog.
+- This run also exposed a fault in the load tool: its feed consumer shared the senders' connection pool, so under load it queued for a connection and reported its own waiting as alarm latency (13 s at p95 in this run). The consumer now has its own connection. Alarm latency figures from the earlier in-Docker runs were taken with spare connections and agree with the request latencies there, but the next run should confirm them.
+
+So this run does not show what the service can do on eight cores. The best measured figure remains the in-Docker one.
+
 ### Where this leaves the burst target
 
 Measured ceiling on an 8-core Windows PC, everything inside Docker Desktop's 4-CPU VM including the load generator: about 11,000 events/s, against a 50,000 events/s target. At roughly four times overload, nothing was refused, every acknowledged event was journaled, no alarm was lost, and alarms arrived in 119 to 280 ms at the 95th percentile. The limit is CPU shared with the load generator, and one HTTP request per event. A fair test of the target needs the load generator on a separate machine.
