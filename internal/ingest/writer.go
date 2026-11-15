@@ -5,6 +5,7 @@ package ingest
 import (
 	"context"
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/junayd-elahi/teton-streaming/internal/store"
@@ -16,7 +17,7 @@ var ErrOverloaded = errors.New("ingest queue full")
 
 // Journal is the storage the writer commits batches to.
 type Journal interface {
-	AppendBatch(ctx context.Context, events []store.Event) ([]store.Outcome, error)
+	AppendBatch(ctx context.Context, events []store.Event) (store.BatchResult, error)
 }
 
 type Config struct {
@@ -39,13 +40,37 @@ type Writer struct {
 	journal Journal
 	cfg     Config
 	queue   chan request
+
+	alarmMu     sync.Mutex
+	alarmSignal chan struct{} // closed and replaced whenever a batch commits new alarms
 }
 
 func NewWriter(journal Journal, cfg Config) *Writer {
 	if cfg.QueueSize < 1 || cfg.BatchSize < 1 || cfg.EnqueueTimeout <= 0 {
 		panic("ingest: QueueSize, BatchSize and EnqueueTimeout must be positive")
 	}
-	return &Writer{journal: journal, cfg: cfg, queue: make(chan request, cfg.QueueSize)}
+	return &Writer{
+		journal:     journal,
+		cfg:         cfg,
+		queue:       make(chan request, cfg.QueueSize),
+		alarmSignal: make(chan struct{}),
+	}
+}
+
+// NewAlarms returns a channel that is closed the next time a batch commits at
+// least one new alarm. Take the channel before querying for alarms, so an
+// alarm committed between the query and the wait is not missed.
+func (w *Writer) NewAlarms() <-chan struct{} {
+	w.alarmMu.Lock()
+	defer w.alarmMu.Unlock()
+	return w.alarmSignal
+}
+
+func (w *Writer) announceAlarms() {
+	w.alarmMu.Lock()
+	defer w.alarmMu.Unlock()
+	close(w.alarmSignal)
+	w.alarmSignal = make(chan struct{})
 }
 
 // Submit queues the event and waits until its batch is committed.
@@ -105,12 +130,15 @@ func (w *Writer) commit(ctx context.Context, batch []request) {
 	for i, req := range batch {
 		events[i] = req.event
 	}
-	outcomes, err := w.journal.AppendBatch(ctx, events)
+	committed, err := w.journal.AppendBatch(ctx, events)
 	for i, req := range batch {
 		if err != nil {
 			req.done <- result{err: err}
 			continue
 		}
-		req.done <- result{outcome: outcomes[i]}
+		req.done <- result{outcome: committed.Outcomes[i]}
+	}
+	if committed.NewAlarms > 0 {
+		w.announceAlarms()
 	}
 }

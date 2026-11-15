@@ -29,10 +29,11 @@ func TestAppendBatchClassifiesEachEvent(t *testing.T) {
 		journalEvent(1, `{"a":2}`),
 		journalEvent(2, `{"a":1}`),
 	}
-	first, err := svc.store.AppendBatch(context.Background(), batch)
+	firstResult, err := svc.store.AppendBatch(context.Background(), batch)
 	if err != nil {
 		t.Fatal(err)
 	}
+	first := firstResult.Outcomes
 	wantFirst := []store.Outcome{store.Inserted, store.Duplicate, store.Conflict, store.Inserted}
 	for i := range wantFirst {
 		if first[i] != wantFirst[i] {
@@ -40,10 +41,11 @@ func TestAppendBatchClassifiesEachEvent(t *testing.T) {
 		}
 	}
 
-	second, err := svc.store.AppendBatch(context.Background(), batch)
+	secondResult, err := svc.store.AppendBatch(context.Background(), batch)
 	if err != nil {
 		t.Fatal(err)
 	}
+	second := secondResult.Outcomes
 	wantSecond := []store.Outcome{store.Duplicate, store.Duplicate, store.Conflict, store.Duplicate}
 	for i := range wantSecond {
 		if second[i] != wantSecond[i] {

@@ -103,12 +103,20 @@ const (
 	Conflict                 // identity already journaled with different content
 )
 
+// BatchResult reports what one committed batch did.
+type BatchResult struct {
+	Outcomes  []Outcome // one per event, in batch order
+	NewAlarms int       // logical falls first seen in this batch
+}
+
 // AppendBatch commits the events to the journal in one transaction, in slice
-// order, and reports one Outcome per event. A (device_id, seq) identity that is
+// order, and reports one Outcome per event. Every newly journaled fall_warn
+// also creates its alarm in the same transaction, unless an alarm for the same
+// logical fall already exists. A (device_id, seq) identity that is
 // already journaled, or that appears earlier in the same batch, is not inserted
 // again: it is a Duplicate if its payload hash matches the journaled row and a
 // Conflict otherwise.
-func (s *Store) AppendBatch(ctx context.Context, events []Event) ([]Outcome, error) {
+func (s *Store) AppendBatch(ctx context.Context, events []Event) (BatchResult, error) {
 	n := len(events)
 	deviceIDs := make([]string, n)
 	seqs := make([]int64, n)
@@ -125,21 +133,35 @@ func (s *Store) AppendBatch(ctx context.Context, events []Event) ([]Outcome, err
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return nil, err
+		return BatchResult{}, err
 	}
 	defer tx.Rollback(ctx)
 
-	// Insert in arrival order so journal ids follow it.
-	if _, err := tx.Exec(ctx, `
-		INSERT INTO event_log (device_id, seq, room_id, type, ts, payload, payload_hash, received_at)
-		SELECT device_id, seq, room_id, type, ts, payload::jsonb, payload_hash, received_at
-		FROM unnest($1::text[], $2::bigint[], $3::text[], $4::text[], $5::timestamptz[],
-		            $6::text[], $7::bytea[], $8::timestamptz[])
-		     WITH ORDINALITY AS t(device_id, seq, room_id, type, ts, payload, payload_hash, received_at, ord)
-		ORDER BY ord
-		ON CONFLICT (device_id, seq) DO NOTHING`,
-		deviceIDs, seqs, roomIDs, types, tss, payloads, hashes, receivedAts); err != nil {
-		return nil, err
+	// Insert in arrival order so journal ids follow it, then derive alarms
+	// from the rows this statement actually inserted.
+	var newAlarms int
+	if err := tx.QueryRow(ctx, `
+		WITH inserted AS (
+			INSERT INTO event_log (device_id, seq, room_id, type, ts, payload, payload_hash, received_at)
+			SELECT device_id, seq, room_id, type, ts, payload::jsonb, payload_hash, received_at
+			FROM unnest($1::text[], $2::bigint[], $3::text[], $4::text[], $5::timestamptz[],
+			            $6::text[], $7::bytea[], $8::timestamptz[])
+			     WITH ORDINALITY AS t(device_id, seq, room_id, type, ts, payload, payload_hash, received_at, ord)
+			ORDER BY ord
+			ON CONFLICT (device_id, seq) DO NOTHING
+			RETURNING id, device_id, seq, room_id, type, ts, payload, received_at
+		), new_alarms AS (
+			INSERT INTO alarms (device_id, room_id, ts, confidence, seq, received_at)
+			SELECT device_id, room_id, ts, (payload->>'confidence')::numeric, seq, received_at
+			FROM inserted
+			WHERE type = 'fall_warn'
+			ORDER BY id
+			ON CONFLICT (device_id, room_id, ts, confidence) DO NOTHING
+			RETURNING 1
+		)
+		SELECT count(*) FROM new_alarms`,
+		deviceIDs, seqs, roomIDs, types, tss, payloads, hashes, receivedAts).Scan(&newAlarms); err != nil {
+		return BatchResult{}, err
 	}
 
 	// Read back the journaled row for every identity in the batch. A row whose id
@@ -159,7 +181,7 @@ func (s *Store) AppendBatch(ctx context.Context, events []Event) ([]Outcome, err
 		  ON e.device_id = k.device_id AND e.seq = k.seq`,
 		deviceIDs, seqs)
 	if err != nil {
-		return nil, err
+		return BatchResult{}, err
 	}
 	stored := make(map[identity]journaled, n)
 	for rows.Next() {
@@ -167,12 +189,12 @@ func (s *Store) AppendBatch(ctx context.Context, events []Event) ([]Outcome, err
 		var j journaled
 		if err := rows.Scan(&id.deviceID, &id.seq, &j.hash, &j.insertedNow); err != nil {
 			rows.Close()
-			return nil, err
+			return BatchResult{}, err
 		}
 		stored[id] = j
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return BatchResult{}, err
 	}
 
 	outcomes := make([]Outcome, n)
@@ -181,7 +203,7 @@ func (s *Store) AppendBatch(ctx context.Context, events []Event) ([]Outcome, err
 		id := identity{e.DeviceID, e.Seq}
 		j, ok := stored[id]
 		if !ok {
-			return nil, fmt.Errorf("event %s/%d missing from journal after insert", e.DeviceID, e.Seq)
+			return BatchResult{}, fmt.Errorf("event %s/%d missing from journal after insert", e.DeviceID, e.Seq)
 		}
 		switch {
 		case !bytes.Equal(j.hash, e.PayloadHash):
@@ -194,9 +216,9 @@ func (s *Store) AppendBatch(ctx context.Context, events []Event) ([]Outcome, err
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return nil, err
+		return BatchResult{}, err
 	}
-	return outcomes, nil
+	return BatchResult{Outcomes: outcomes, NewAlarms: newAlarms}, nil
 }
 
 // CountEvents returns the number of journaled events.
@@ -206,9 +228,9 @@ func (s *Store) CountEvents(ctx context.Context) (int64, error) {
 	return n, err
 }
 
-// Reset empties the journal. Used by integration tests only.
+// Reset empties the journal and alarms. Used by integration tests only.
 func (s *Store) Reset(ctx context.Context) error {
-	_, err := s.pool.Exec(ctx, `TRUNCATE event_log RESTART IDENTITY`)
+	_, err := s.pool.Exec(ctx, `TRUNCATE event_log, alarms RESTART IDENTITY`)
 	return err
 }
 
@@ -266,4 +288,46 @@ func (s *Store) PresenceTimeline(ctx context.Context, roomID string, start, end 
 		return nil, nil, err
 	}
 	return predecessor, transitions, nil
+}
+
+// Alarm is one logical fall.
+type Alarm struct {
+	ID         int64 // feed cursor, increasing in commit order
+	DeviceID   string
+	RoomID     string
+	TS         time.Time // the device's original event time
+	Confidence float64
+	Seq        int64 // sequence number of the first event seen for this fall
+	ReceivedAt time.Time
+}
+
+const alarmColumns = `id, device_id, room_id, ts, confidence::float8, seq, received_at`
+
+func scanAlarm(row pgx.CollectableRow) (Alarm, error) {
+	var a Alarm
+	err := row.Scan(&a.ID, &a.DeviceID, &a.RoomID, &a.TS, &a.Confidence, &a.Seq, &a.ReceivedAt)
+	return a, err
+}
+
+// AlarmsSince returns every alarm with event time at or after since, ordered
+// by event time.
+func (s *Store) AlarmsSince(ctx context.Context, since time.Time) ([]Alarm, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT `+alarmColumns+` FROM alarms WHERE ts >= $1 ORDER BY ts, id`, since)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, scanAlarm)
+}
+
+// AlarmsAfter returns up to limit alarms committed after the cursor, in commit
+// order. A late fall gets a new, higher id even though its event time is old,
+// so a consumer resuming from its cursor still receives it.
+func (s *Store) AlarmsAfter(ctx context.Context, cursor int64, limit int) ([]Alarm, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT `+alarmColumns+` FROM alarms WHERE id > $1 ORDER BY id LIMIT $2`, cursor, limit)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, scanAlarm)
 }
