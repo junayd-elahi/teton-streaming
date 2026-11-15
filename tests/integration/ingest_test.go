@@ -5,14 +5,18 @@ package integration
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/junayd-elahi/teton-streaming/internal/api"
+	"github.com/junayd-elahi/teton-streaming/internal/ingest"
 	"github.com/junayd-elahi/teton-streaming/internal/store"
 	"github.com/junayd-elahi/teton-streaming/migrations"
 )
@@ -21,8 +25,18 @@ var fixedNow = time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
 
 const heartbeat = `{"device_id":"dev_0001","room_id":"room_001","type":"heartbeat","ts":"2026-11-15T11:59:59.500Z","seq":1}`
 
-// startService opens a fresh store and HTTP server, as a process start would.
-func startService(t *testing.T) (*store.Store, *httptest.Server) {
+// service is one running instance: store, writer and HTTP server.
+type service struct {
+	store      *store.Store
+	srv        *httptest.Server
+	stopWriter context.CancelFunc
+	// dropNextResponse makes the server process the next request fully and then
+	// close the connection without replying, like a response lost on the network.
+	dropNextResponse bool
+}
+
+// startService opens a fresh store, writer and HTTP server, as a process start would.
+func startService(t *testing.T) *service {
 	t.Helper()
 	url := os.Getenv("DATABASE_URL")
 	if url == "" {
@@ -36,100 +50,140 @@ func startService(t *testing.T) (*store.Store, *httptest.Server) {
 	if err := st.Migrate(ctx, migrations.Files); err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(api.New(st, func() time.Time { return fixedNow }).Handler())
-	return st, srv
+	writerCtx, stopWriter := context.WithCancel(ctx)
+	writer := ingest.NewWriter(st, ingest.Config{QueueSize: 1000, BatchSize: 100, EnqueueTimeout: 2 * time.Second})
+	go writer.Run(writerCtx)
+
+	svc := &service{store: st, stopWriter: stopWriter}
+	handler := api.New(writer, func() time.Time { return fixedNow }).Handler()
+	svc.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !svc.dropNextResponse {
+			handler.ServeHTTP(w, r)
+			return
+		}
+		svc.dropNextResponse = false
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, r)
+		if rec.Code != http.StatusOK {
+			t.Errorf("dropped request: status %d, want 200", rec.Code)
+		}
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		conn.Close()
+	}))
+	return svc
 }
 
-func stopService(st *store.Store, srv *httptest.Server) {
-	srv.Close()
-	st.Close()
+func (s *service) stop() {
+	s.srv.Close()
+	s.stopWriter()
+	s.store.Close()
 }
 
-func post(t *testing.T, srv *httptest.Server, body string) int {
+// reply is the status and decoded body of one POST /events.
+type reply struct {
+	status    int
+	duplicate bool
+}
+
+func postReply(t *testing.T, svc *service, body string) reply {
 	t.Helper()
-	resp, err := http.Post(srv.URL+"/events", "application/json", strings.NewReader(body))
+	resp, err := http.Post(svc.srv.URL+"/events", "application/json", strings.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
-	return resp.StatusCode
+	defer resp.Body.Close()
+	var decoded struct {
+		Duplicate bool `json:"duplicate"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+		t.Fatal(err)
+	}
+	return reply{status: resp.StatusCode, duplicate: decoded.Duplicate}
 }
 
-func count(t *testing.T, st *store.Store) int64 {
+func post(t *testing.T, svc *service, body string) int {
 	t.Helper()
-	n, err := st.CountEvents(context.Background())
+	return postReply(t, svc, body).status
+}
+
+func count(t *testing.T, svc *service) int64 {
+	t.Helper()
+	n, err := svc.store.CountEvents(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	return n
 }
 
-func reset(t *testing.T, st *store.Store) {
+func reset(t *testing.T, svc *service) {
 	t.Helper()
-	if err := st.Reset(context.Background()); err != nil {
+	if err := svc.store.Reset(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 }
-
 func TestEventSurvivesRestartAndReplayHasNoEffect(t *testing.T) {
-	st, srv := startService(t)
-	reset(t, st)
-	if got := post(t, srv, heartbeat); got != http.StatusOK {
+	svc := startService(t)
+	reset(t, svc)
+	if got := post(t, svc, heartbeat); got != http.StatusOK {
 		t.Fatalf("first post: status %d", got)
 	}
-	stopService(st, srv)
+	svc.stop()
 
-	st, srv = startService(t)
-	defer stopService(st, srv)
-	if got := count(t, st); got != 1 {
+	svc = startService(t)
+	defer svc.stop()
+	if got := count(t, svc); got != 1 {
 		t.Fatalf("after restart: %d events, want 1", got)
 	}
 	for i := 0; i < 100; i++ {
-		if got := post(t, srv, heartbeat); got != http.StatusOK {
+		if got := post(t, svc, heartbeat); got != http.StatusOK {
 			t.Fatalf("replay %d: status %d", i, got)
 		}
 	}
-	if got := count(t, st); got != 1 {
+	if got := count(t, svc); got != 1 {
 		t.Fatalf("after 100 replays: %d events, want 1", got)
 	}
 }
 
 func TestReplayWithReorderedKeysIsSameEvent(t *testing.T) {
-	st, srv := startService(t)
-	defer stopService(st, srv)
-	reset(t, st)
+	svc := startService(t)
+	defer svc.stop()
+	reset(t, svc)
 	reordered := `{"seq":1,"ts":"2026-11-15T11:59:59.500Z","type":"heartbeat","room_id":"room_001","device_id":"dev_0001"}`
-	if got := post(t, srv, heartbeat); got != http.StatusOK {
+	if got := post(t, svc, heartbeat); got != http.StatusOK {
 		t.Fatalf("first post: status %d", got)
 	}
-	if got := post(t, srv, reordered); got != http.StatusOK {
+	if got := post(t, svc, reordered); got != http.StatusOK {
 		t.Fatalf("reordered replay: status %d", got)
 	}
-	if got := count(t, st); got != 1 {
+	if got := count(t, svc); got != 1 {
 		t.Fatalf("%d events, want 1", got)
 	}
 }
 
 func TestSameIdentityDifferentPayloadIsConflict(t *testing.T) {
-	st, srv := startService(t)
-	defer stopService(st, srv)
-	reset(t, st)
+	svc := startService(t)
+	defer svc.stop()
+	reset(t, svc)
 	changed := strings.Replace(heartbeat, "room_001", "room_002", 1)
-	if got := post(t, srv, heartbeat); got != http.StatusOK {
+	if got := post(t, svc, heartbeat); got != http.StatusOK {
 		t.Fatalf("first post: status %d", got)
 	}
-	if got := post(t, srv, changed); got != http.StatusConflict {
+	if got := post(t, svc, changed); got != http.StatusConflict {
 		t.Fatalf("changed payload: status %d, want 409", got)
 	}
-	if got := count(t, st); got != 1 {
+	if got := count(t, svc); got != 1 {
 		t.Fatalf("%d events, want 1", got)
 	}
 }
 
 func TestValidation(t *testing.T) {
-	st, srv := startService(t)
-	defer stopService(st, srv)
-	reset(t, st)
+	svc := startService(t)
+	defer svc.stop()
+	reset(t, svc)
 
 	event := func(ts string) string {
 		return `{"device_id":"dev_0002","room_id":"room_001","type":"heartbeat","ts":"` + ts + `","seq":1}`
@@ -148,11 +202,107 @@ func TestValidation(t *testing.T) {
 		{"bad ts", `{"device_id":"dev_0003","room_id":"room_001","type":"heartbeat","ts":"yesterday","seq":1}`, http.StatusBadRequest},
 	}
 	for _, c := range cases {
-		if got := post(t, srv, c.body); got != c.want {
+		if got := post(t, svc, c.body); got != c.want {
 			t.Errorf("%s: status %d, want %d", c.name, got, c.want)
 		}
 	}
-	if got := count(t, st); got != 1 {
+	if got := count(t, svc); got != 1 {
 		t.Fatalf("%d events, want 1 (only the accepted case)", got)
+	}
+}
+
+// 50 simultaneous copies of one event: all succeed, one row, and exactly one of
+// them is reported as the original.
+func TestConcurrentIdenticalRequestsStoreOneEvent(t *testing.T) {
+	svc := startService(t)
+	defer svc.stop()
+	reset(t, svc)
+
+	const senders = 50
+	replies := make([]reply, senders)
+	var wg sync.WaitGroup
+	for i := range replies {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			replies[i] = postReply(t, svc, heartbeat)
+		}()
+	}
+	wg.Wait()
+
+	originals := 0
+	for i, r := range replies {
+		if r.status != http.StatusOK {
+			t.Fatalf("sender %d: status %d", i, r.status)
+		}
+		if !r.duplicate {
+			originals++
+		}
+	}
+	if originals != 1 {
+		t.Fatalf("%d requests reported as the original, want 1", originals)
+	}
+	if got := count(t, svc); got != 1 {
+		t.Fatalf("%d events, want 1", got)
+	}
+}
+
+// 20 simultaneous events sharing one identity but each with different content:
+// exactly one wins, the rest are visible conflicts.
+func TestConcurrentConflictingRequestsKeepOneAndRejectTheRest(t *testing.T) {
+	svc := startService(t)
+	defer svc.stop()
+	reset(t, svc)
+
+	const senders = 20
+	statuses := make([]int, senders)
+	var wg sync.WaitGroup
+	for i := range statuses {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			body := fmt.Sprintf(`{"device_id":"dev_0006","room_id":"room_%03d","type":"heartbeat","ts":"2026-11-15T12:00:00.000Z","seq":1}`, i)
+			statuses[i] = post(t, svc, body)
+		}()
+	}
+	wg.Wait()
+
+	accepted, conflicts := 0, 0
+	for _, status := range statuses {
+		switch status {
+		case http.StatusOK:
+			accepted++
+		case http.StatusConflict:
+			conflicts++
+		}
+	}
+	if accepted != 1 || conflicts != senders-1 {
+		t.Fatalf("accepted %d, conflicts %d; want 1 and %d", accepted, conflicts, senders-1)
+	}
+	if got := count(t, svc); got != 1 {
+		t.Fatalf("%d events, want 1", got)
+	}
+}
+
+// The event commits but the reply never reaches the sender. The sender's retry
+// must succeed as a duplicate and leave one row.
+func TestRetryAfterLostResponseIsDuplicate(t *testing.T) {
+	svc := startService(t)
+	defer svc.stop()
+	reset(t, svc)
+
+	svc.dropNextResponse = true
+	if _, err := http.Post(svc.srv.URL+"/events", "application/json", strings.NewReader(heartbeat)); err == nil {
+		t.Fatal("expected the first request to fail with a lost response")
+	}
+	if got := count(t, svc); got != 1 {
+		t.Fatalf("after lost response: %d events, want 1 (committed before the reply)", got)
+	}
+	retry := postReply(t, svc, heartbeat)
+	if retry.status != http.StatusOK || !retry.duplicate {
+		t.Fatalf("retry: status %d duplicate %v, want 200 and true", retry.status, retry.duplicate)
+	}
+	if got := count(t, svc); got != 1 {
+		t.Fatalf("after retry: %d events, want 1", got)
 	}
 }

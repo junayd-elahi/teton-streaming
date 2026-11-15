@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/junayd-elahi/teton-streaming/internal/ingest"
 	"github.com/junayd-elahi/teton-streaming/internal/store"
 )
 
@@ -23,12 +24,12 @@ var eventTypes = map[string]bool{
 }
 
 type Server struct {
-	store *store.Store
-	now   func() time.Time
+	writer *ingest.Writer
+	now    func() time.Time
 }
 
-func New(s *store.Store, now func() time.Time) *Server {
-	return &Server{store: s, now: now}
+func New(w *ingest.Writer, now func() time.Time) *Server {
+	return &Server{writer: w, now: now}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -49,19 +50,22 @@ func (s *Server) postEvent(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
-	inserted, err := s.store.Append(r.Context(), event)
-	if errors.Is(err, store.ErrConflict) {
+	outcome, err := s.writer.Submit(r.Context(), event)
+	switch {
+	case errors.Is(err, ingest.ErrOverloaded):
+		w.Header().Set("Retry-After", "1")
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "overloaded, retry"})
+	case err != nil:
+		slog.Error("journal write failed", "err", err)
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable, retry"})
+	case outcome == store.Conflict:
 		slog.Warn("identity conflict", "device_id", event.DeviceID, "seq", event.Seq,
 			"payload", string(event.Payload))
-		writeJSON(w, http.StatusConflict, map[string]any{"error": err.Error()})
-		return
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error": "device_id and seq already used with different content"})
+	default:
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "duplicate": outcome == store.Duplicate})
 	}
-	if err != nil {
-		slog.Error("append failed", "err", err)
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable"})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "duplicate": !inserted})
 }
 
 // parseEvent validates the envelope and builds the canonical payload.

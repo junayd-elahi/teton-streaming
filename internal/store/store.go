@@ -4,7 +4,6 @@ package store
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"io/fs"
 	"sort"
@@ -12,9 +11,6 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
-
-// ErrConflict means a (device_id, seq) identity was reused with different content.
-var ErrConflict = errors.New("source identity reused with different payload")
 
 // Event is one validated source event ready to be journaled.
 type Event struct {
@@ -94,31 +90,109 @@ func (s *Store) applyMigration(ctx context.Context, files fs.FS, name string) er
 	return tx.Commit(ctx)
 }
 
-// Append commits the event to the journal. It returns inserted=false for an exact
-// retry of an already-journaled event, and ErrConflict when the identity exists
-// with different content.
-func (s *Store) Append(ctx context.Context, e Event) (inserted bool, err error) {
-	tag, err := s.pool.Exec(ctx, `
-		INSERT INTO event_log (device_id, seq, room_id, type, ts, payload, payload_hash, received_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		ON CONFLICT (device_id, seq) DO NOTHING`,
-		e.DeviceID, e.Seq, e.RoomID, e.Type, e.TS, e.Payload, e.PayloadHash, e.ReceivedAt)
+// Outcome says what happened to one event in a committed batch.
+type Outcome int
+
+const (
+	Inserted  Outcome = iota // new journal row
+	Duplicate                // exact retry of an already-journaled event, no effect
+	Conflict                 // identity already journaled with different content
+)
+
+// AppendBatch commits the events to the journal in one transaction, in slice
+// order, and reports one Outcome per event. A (device_id, seq) identity that is
+// already journaled, or that appears earlier in the same batch, is not inserted
+// again: it is a Duplicate if its payload hash matches the journaled row and a
+// Conflict otherwise.
+func (s *Store) AppendBatch(ctx context.Context, events []Event) ([]Outcome, error) {
+	n := len(events)
+	deviceIDs := make([]string, n)
+	seqs := make([]int64, n)
+	roomIDs := make([]string, n)
+	types := make([]string, n)
+	tss := make([]time.Time, n)
+	payloads := make([]string, n)
+	hashes := make([][]byte, n)
+	receivedAts := make([]time.Time, n)
+	for i, e := range events {
+		deviceIDs[i], seqs[i], roomIDs[i], types[i] = e.DeviceID, e.Seq, e.RoomID, e.Type
+		tss[i], payloads[i], hashes[i], receivedAts[i] = e.TS, string(e.Payload), e.PayloadHash, e.ReceivedAt
+	}
+
+	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
-	if tag.RowsAffected() == 1 {
-		return true, nil
+	defer tx.Rollback(ctx)
+
+	// Insert in arrival order so journal ids follow it.
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO event_log (device_id, seq, room_id, type, ts, payload, payload_hash, received_at)
+		SELECT device_id, seq, room_id, type, ts, payload::jsonb, payload_hash, received_at
+		FROM unnest($1::text[], $2::bigint[], $3::text[], $4::text[], $5::timestamptz[],
+		            $6::text[], $7::bytea[], $8::timestamptz[])
+		     WITH ORDINALITY AS t(device_id, seq, room_id, type, ts, payload, payload_hash, received_at, ord)
+		ORDER BY ord
+		ON CONFLICT (device_id, seq) DO NOTHING`,
+		deviceIDs, seqs, roomIDs, types, tss, payloads, hashes, receivedAts); err != nil {
+		return nil, err
 	}
-	var existing []byte
-	if err := s.pool.QueryRow(ctx,
-		`SELECT payload_hash FROM event_log WHERE device_id = $1 AND seq = $2`,
-		e.DeviceID, e.Seq).Scan(&existing); err != nil {
-		return false, err
+
+	// Read back the journaled row for every identity in the batch. A row whose id
+	// is new in this transaction (xmin = current transaction) was inserted by it.
+	type journaled struct {
+		hash        []byte
+		insertedNow bool
 	}
-	if !bytes.Equal(existing, e.PayloadHash) {
-		return false, ErrConflict
+	type identity struct {
+		deviceID string
+		seq      int64
 	}
-	return false, nil
+	rows, err := tx.Query(ctx, `
+		SELECT e.device_id, e.seq, e.payload_hash, e.xmin::text = pg_current_xact_id()::xid::text
+		FROM event_log e
+		JOIN (SELECT DISTINCT * FROM unnest($1::text[], $2::bigint[]) AS k(device_id, seq)) k
+		  ON e.device_id = k.device_id AND e.seq = k.seq`,
+		deviceIDs, seqs)
+	if err != nil {
+		return nil, err
+	}
+	stored := make(map[identity]journaled, n)
+	for rows.Next() {
+		var id identity
+		var j journaled
+		if err := rows.Scan(&id.deviceID, &id.seq, &j.hash, &j.insertedNow); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		stored[id] = j
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	outcomes := make([]Outcome, n)
+	claimed := make(map[identity]bool, n) // identities whose new row is already attributed
+	for i, e := range events {
+		id := identity{e.DeviceID, e.Seq}
+		j, ok := stored[id]
+		if !ok {
+			return nil, fmt.Errorf("event %s/%d missing from journal after insert", e.DeviceID, e.Seq)
+		}
+		switch {
+		case !bytes.Equal(j.hash, e.PayloadHash):
+			outcomes[i] = Conflict
+		case j.insertedNow && !claimed[id]:
+			outcomes[i] = Inserted
+			claimed[id] = true
+		default:
+			outcomes[i] = Duplicate
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return outcomes, nil
 }
 
 // CountEvents returns the number of journaled events.
