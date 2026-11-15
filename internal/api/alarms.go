@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"log/slog"
+	"math"
 	"net/http"
 	"strconv"
 	"time"
@@ -13,6 +14,8 @@ import (
 const (
 	maxFeedWait   = 30 * time.Second
 	feedPageLimit = 1000
+	// maxUnixSeconds is 9999-12-31T23:59:59Z.
+	maxUnixSeconds = 253402300799
 )
 
 // getAlarms serves two views of the same alarms:
@@ -59,7 +62,8 @@ func (s *Server) getAlarmFeed(w http.ResponseWriter, r *http.Request) {
 	var wait time.Duration
 	if query.Has("wait") {
 		seconds, err := strconv.ParseFloat(query.Get("wait"), 64)
-		if err != nil || seconds < 0 || seconds > maxFeedWait.Seconds() {
+		// Written as "not inside the range" so NaN is rejected too.
+		if err != nil || !(seconds >= 0 && seconds <= maxFeedWait.Seconds()) {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "wait must be between 0 and 30 seconds"})
 			return
 		}
@@ -100,7 +104,12 @@ func parseSince(raw string) (time.Time, error) {
 		return time.Unix(0, 0), nil
 	}
 	if seconds, err := strconv.ParseFloat(raw, 64); err == nil {
-		return time.Unix(0, int64(seconds*float64(time.Second))), nil
+		// Unix seconds between 1970 and the year 9999; this also excludes NaN and infinities.
+		if !(seconds >= 0 && seconds <= maxUnixSeconds) {
+			return time.Time{}, errors.New("since is out of range")
+		}
+		whole := math.Floor(seconds)
+		return time.Unix(int64(whole), int64((seconds-whole)*1e9)), nil
 	}
 	if ts, err := time.Parse(time.RFC3339Nano, raw); err == nil {
 		return ts, nil

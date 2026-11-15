@@ -230,3 +230,16 @@ func TestLongPollTimesOutEmptyAndRejectsBadParameters(t *testing.T) {
 		}
 	}
 }
+
+func TestAlarmQueryRejectsNonFiniteParameters(t *testing.T) {
+	svc := startService(t)
+	defer svc.stop()
+	reset(t, svc)
+
+	var body map[string]any
+	for _, query := range []string{"since=NaN", "since=Inf", "since=-1", "since=1e300", "after_id=0&wait=NaN", "after_id=0&wait=Inf"} {
+		if status := getJSON(t, svc, "/alarms?"+query, &body); status != http.StatusBadRequest {
+			t.Errorf("%s: status %d, want 400", query, status)
+		}
+	}
+}
