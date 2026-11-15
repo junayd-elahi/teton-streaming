@@ -3,8 +3,10 @@ package integration
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 )
@@ -30,28 +32,46 @@ func mustPost(t *testing.T, svc *service, body string) {
 }
 
 type health struct {
-	LastHeartbeatTS *string `json:"last_heartbeat_ts"`
-	Availability5m  float64 `json:"availability_5m"`
+	LastHeartbeatTS    *string `json:"last_heartbeat_ts"`
+	Availability5m     float64 `json:"availability_5m"`
+	ClockOffsetSeconds float64 `json:"clock_offset_seconds"`
 }
 
 func heartbeatAt(device string, seq int, ts string) string {
 	return fmt.Sprintf(`{"device_id":"%s","room_id":"room_h","type":"heartbeat","ts":"%s","seq":%d}`, device, ts, seq)
 }
 
-// Clock is 12:05:00. The window is (12:00:00, 12:05:00].
+func parseTS(t *testing.T, ts string) time.Time {
+	t.Helper()
+	parsed, err := time.Parse(time.RFC3339Nano, ts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return parsed
+}
+
+// postLive sends a heartbeat that the service receives `delay` after the
+// device stamped it. A negative delay is a device whose clock runs ahead.
+func postLive(t *testing.T, svc *service, device string, seq int, ts string, delay time.Duration) {
+	t.Helper()
+	svc.clock = parseTS(t, ts).Add(delay)
+	mustPost(t, svc, heartbeatAt(device, seq, ts))
+}
+
+// A device with an accurate clock, read at 12:05:00. The window is
+// (12:00:00, 12:05:00].
 func TestDeviceHealthCountsDistinctSecondsInsideTheWindow(t *testing.T) {
 	svc := startService(t)
 	defer svc.stop()
 	reset(t, svc)
-	svc.clock = time.Date(2026, 11, 15, 12, 5, 0, 0, time.UTC)
 
-	mustPost(t, svc, heartbeatAt("dev_h1", 1, "2026-11-15T12:00:00.000Z")) // on the open edge: excluded
-	mustPost(t, svc, heartbeatAt("dev_h1", 2, "2026-11-15T12:00:00.500Z")) // oldest slot
-	mustPost(t, svc, heartbeatAt("dev_h1", 3, "2026-11-15T12:04:59.200Z")) // newest slot
-	mustPost(t, svc, heartbeatAt("dev_h1", 4, "2026-11-15T12:04:59.700Z")) // same slot again
-	mustPost(t, svc, heartbeatAt("dev_h1", 5, "2026-11-15T12:05:00.000Z")) // on the closed edge: included, same slot
-	mustPost(t, svc, heartbeatAt("dev_h1", 6, "2026-11-15T12:05:30.000Z")) // ahead of the clock: not yet effective
-	mustPost(t, svc, heartbeatAt("dev_other", 1, "2026-11-15T12:03:00.000Z"))
+	postLive(t, svc, "dev_h1", 1, "2026-11-15T12:00:00.000Z", 0) // on the open edge: excluded
+	postLive(t, svc, "dev_h1", 2, "2026-11-15T12:00:00.500Z", 0) // oldest slot
+	postLive(t, svc, "dev_h1", 3, "2026-11-15T12:04:59.200Z", 0) // newest slot
+	postLive(t, svc, "dev_h1", 4, "2026-11-15T12:04:59.700Z", 0) // same slot again
+	postLive(t, svc, "dev_h1", 5, "2026-11-15T12:05:00.000Z", 0) // on the closed edge: included, same slot
+	postLive(t, svc, "dev_other", 1, "2026-11-15T12:03:00.000Z", 0)
+	svc.clock = time.Date(2026, 11, 15, 12, 5, 0, 0, time.UTC)
 
 	var got health
 	if status := getJSON(t, svc, "/devices/dev_h1/health", &got); status != http.StatusOK {
@@ -63,12 +83,62 @@ func TestDeviceHealthCountsDistinctSecondsInsideTheWindow(t *testing.T) {
 	if want := 2.0 / 300; math.Abs(got.Availability5m-want) > 1e-12 {
 		t.Errorf("availability_5m %v, want %v", got.Availability5m, want)
 	}
+	if got.ClockOffsetSeconds != 0 {
+		t.Errorf("clock_offset_seconds %v, want 0", got.ClockOffsetSeconds)
+	}
+}
 
-	// Thirty seconds later the future heartbeat has become effective.
-	svc.clock = svc.clock.Add(30 * time.Second)
-	getJSON(t, svc, "/devices/dev_h1/health", &got)
-	if *got.LastHeartbeatTS != "2026-11-15T12:05:30.000Z" {
-		t.Errorf("after clock advance: last_heartbeat_ts %v", *got.LastHeartbeatTS)
+// A healthy device sends one heartbeat a second for five minutes. Whether its
+// clock is right, 30 s behind or 30 s ahead, availability is 1.
+func TestDeviceHealthIsNotReducedByClockSkew(t *testing.T) {
+	svc := startService(t)
+	defer svc.stop()
+	reset(t, svc)
+
+	serverEnd := time.Date(2026, 11, 15, 12, 5, 0, 0, time.UTC)
+	skews := map[string]time.Duration{"dev_exact": 0, "dev_behind": -30 * time.Second, "dev_ahead": 30 * time.Second}
+	for device, skew := range skews {
+		for i := 299; i >= 0; i-- {
+			serverTime := serverEnd.Add(-time.Duration(i) * time.Second)
+			deviceTS := serverTime.Add(skew).Format("2006-01-02T15:04:05.000Z")
+			postLive(t, svc, device, 300-i, deviceTS, -skew)
+		}
+	}
+	svc.clock = serverEnd
+	for device, skew := range skews {
+		var got health
+		getJSON(t, svc, "/devices/"+device+"/health", &got)
+		if got.Availability5m != 1 {
+			t.Errorf("%s: availability_5m %v, want 1", device, got.Availability5m)
+		}
+		if got.ClockOffsetSeconds != skew.Seconds() {
+			t.Errorf("%s: clock_offset_seconds %v, want %v", device, got.ClockOffsetSeconds, skew.Seconds())
+		}
+	}
+}
+
+// A device 30 s behind sends for five minutes and then stops. Two minutes
+// later, 120 of its last 300 seconds are silent: availability is 0.6.
+func TestDeviceHealthFallsAfterASkewedDeviceStops(t *testing.T) {
+	svc := startService(t)
+	defer svc.stop()
+	reset(t, svc)
+
+	stopped := time.Date(2026, 11, 15, 12, 5, 0, 0, time.UTC)
+	skew := -30 * time.Second
+	for i := 299; i >= 0; i-- {
+		serverTime := stopped.Add(-time.Duration(i) * time.Second)
+		postLive(t, svc, "dev_dead", 300-i, serverTime.Add(skew).Format("2006-01-02T15:04:05.000Z"), -skew)
+	}
+	svc.clock = stopped.Add(2 * time.Minute)
+
+	var got health
+	getJSON(t, svc, "/devices/dev_dead/health", &got)
+	if want := 180.0 / 300; math.Abs(got.Availability5m-want) > 1e-12 {
+		t.Errorf("availability_5m %v, want %v", got.Availability5m, want)
+	}
+	if *got.LastHeartbeatTS != "2026-11-15T12:04:30.000Z" {
+		t.Errorf("last_heartbeat_ts %v, want the device's own 12:04:30", *got.LastHeartbeatTS)
 	}
 }
 
@@ -93,7 +163,7 @@ func TestDeviceHealthFullAvailabilityAndUnknownDevice(t *testing.T) {
 	if status := getJSON(t, svc, "/devices/dev_never_seen/health", &unknown); status != http.StatusOK {
 		t.Fatalf("unknown device: status %d", status)
 	}
-	if unknown.LastHeartbeatTS != nil || unknown.Availability5m != 0 {
+	if unknown.LastHeartbeatTS != nil || unknown.Availability5m != 0 || unknown.ClockOffsetSeconds != 0 {
 		t.Errorf("unknown device: got %+v, want null and 0", unknown)
 	}
 }
@@ -218,5 +288,74 @@ func TestOccupancyUnknownRoomAndBadWindow(t *testing.T) {
 	var body map[string]any
 	if status := getJSON(t, svc, "/rooms/room_a/occupancy?window=2m", &body); status != http.StatusBadRequest {
 		t.Fatalf("window=2m: status %d, want 400", status)
+	}
+}
+
+// A device whose clock runs 20 s ahead reports "present". The room is occupied
+// now, although that timestamp has not been reached on the server clock; the
+// occupied time only starts to count once it is.
+func TestInRoomFollowsLatestPresenceEvenWhenDatedAhead(t *testing.T) {
+	svc := startService(t)
+	defer svc.stop()
+	reset(t, svc)
+	svc.clock = time.Date(2026, 11, 15, 12, 1, 0, 0, time.UTC)
+
+	mustPost(t, svc, presenceAt("room_d", "dev_d", 1, "2026-11-15T11:59:00.000Z", false))
+	mustPost(t, svc, presenceAt("room_d", "dev_d", 2, "2026-11-15T12:01:20.000Z", true))
+
+	got := occupancyOf(t, svc, "room_d", "1m")
+	want := occupancy{InRoom: true, OccupiedPct: 0, WindowSeconds: 60, KnownSeconds: 60, UnknownSeconds: 0}
+	if got != want {
+		t.Fatalf("at 12:01:00: got %+v, want %+v", got, want)
+	}
+
+	svc.clock = svc.clock.Add(50 * time.Second) // 12:01:50, 30 s after the transition
+	got = occupancyOf(t, svc, "room_d", "1m")
+	want = occupancy{InRoom: true, OccupiedPct: 0.5, WindowSeconds: 60, KnownSeconds: 60, UnknownSeconds: 0}
+	if got != want {
+		t.Fatalf("at 12:01:50: got %+v, want %+v", got, want)
+	}
+}
+
+// The readiness and metrics endpoints answer, and the metrics count what the
+// service just did.
+func TestReadinessAndMetricsReflectActivity(t *testing.T) {
+	svc := startService(t)
+	defer svc.stop()
+	reset(t, svc)
+
+	var ready struct {
+		Ready bool `json:"ready"`
+	}
+	if status := getJSON(t, svc, "/readyz", &ready); status != http.StatusOK || !ready.Ready {
+		t.Fatalf("readyz: status %d ready %v, want 200 and true", status, ready.Ready)
+	}
+
+	mustPost(t, svc, heartbeatAt("dev_m", 1, "2026-11-15T11:59:00.000Z"))
+	mustPost(t, svc, heartbeatAt("dev_m", 1, "2026-11-15T11:59:00.000Z")) // duplicate
+	mustPost(t, svc, fallAt("dev_m", "room_m", 2, "2026-11-15T11:59:01.000Z", 0.9))
+	post(t, svc, `{`) // invalid
+
+	resp, err := http.Get(svc.srv.URL + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	for _, line := range []string{
+		`teton_events_received_total{outcome="accepted"} 2`,
+		`teton_events_received_total{outcome="duplicate"} 1`,
+		`teton_events_received_total{outcome="invalid"} 1`,
+		`teton_events_accepted_total{type="fall_warn"} 1`,
+		`teton_alarms_created_total 1`,
+		`teton_ingest_queue_depth{queue="priority"} 0`,
+	} {
+		if !strings.Contains(text, line+"\n") {
+			t.Errorf("metrics output is missing %q", line)
+		}
 	}
 }

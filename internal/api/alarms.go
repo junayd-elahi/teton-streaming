@@ -21,7 +21,7 @@ const (
 
 // getAlarms serves two views of the same alarms:
 //
-//	GET /alarms?since=<ts>                  snapshot ordered by event time
+//	GET /alarms?since=<ts>                  alarms received since, ordered by event time
 //	GET /alarms?after_id=<cursor>&wait=<s>  resumable feed in commit order
 func (s *Server) getAlarms(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Has("after_id") {
@@ -31,9 +31,11 @@ func (s *Server) getAlarms(w http.ResponseWriter, r *http.Request) {
 	s.getAlarmSnapshot(w, r)
 }
 
-// getAlarmSnapshot returns every alarm whose event time is at or after since.
-// since is unix seconds (0 means everything) or an ISO 8601 timestamp.
+// getAlarmSnapshot returns every alarm received at or after since, ordered by
+// event time. since is unix seconds (0 means everything) or an ISO 8601
+// timestamp.
 func (s *Server) getAlarmSnapshot(w http.ResponseWriter, r *http.Request) {
+	s.metrics.ReadRequests.With("alarms_snapshot").Inc()
 	since, err := parseSince(r.URL.Query().Get("since"))
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
@@ -41,6 +43,7 @@ func (s *Server) getAlarmSnapshot(w http.ResponseWriter, r *http.Request) {
 	}
 	alarms, err := s.store.AlarmsSince(r.Context(), since)
 	if err != nil {
+		s.metrics.ReadErrors.Inc()
 		slog.Error("alarm snapshot query failed", "err", err)
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable, retry"})
 		return
@@ -54,6 +57,7 @@ func (s *Server) getAlarmSnapshot(w http.ResponseWriter, r *http.Request) {
 // across disconnects and service restarts because the cursor is the alarm's
 // durable id.
 func (s *Server) getAlarmFeed(w http.ResponseWriter, r *http.Request) {
+	s.metrics.ReadRequests.With("alarms_feed").Inc()
 	query := r.URL.Query()
 	cursor, err := strconv.ParseInt(query.Get("after_id"), 10, 64)
 	if err != nil || cursor < 0 {
@@ -73,11 +77,14 @@ func (s *Server) getAlarmFeed(w http.ResponseWriter, r *http.Request) {
 
 	deadline := time.NewTimer(wait)
 	defer deadline.Stop()
+	s.metrics.FeedWaiters.Add(1)
+	defer s.metrics.FeedWaiters.Add(-1)
 	for {
 		// Take the signal before querying so a commit in between still wakes us.
 		newAlarms := s.writer.NewAlarms()
 		alarms, err := s.store.AlarmsAfter(r.Context(), cursor, feedPageLimit)
 		if err != nil {
+			s.metrics.ReadErrors.Inc()
 			slog.Error("alarm feed query failed", "err", err)
 			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable, retry"})
 			return

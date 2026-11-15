@@ -22,8 +22,10 @@ services:
       DATABASE_URL: postgres://teton:teton@db:5432/teton
       LISTEN_ADDR: ":8080"
       INGEST_QUEUE_SIZE: "10000"
+      INGEST_PRIORITY_QUEUE_SIZE: "10000"
       INGEST_BATCH_SIZE: "500"
       INGEST_ENQUEUE_TIMEOUT_MS: "2000"
+      INGEST_COMMIT_TIMEOUT_MS: "5000"
     ports:
       - "8080:8080"
     depends_on:

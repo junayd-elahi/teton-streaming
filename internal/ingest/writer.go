@@ -1,4 +1,4 @@
-// Package ingest serialises journal writes through one bounded queue and one
+// Package ingest serialises journal writes through bounded queues and one
 // batching writer, so journal order equals commit order.
 package ingest
 
@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/junayd-elahi/teton-streaming/internal/metrics"
 	"github.com/junayd-elahi/teton-streaming/internal/store"
 )
 
@@ -15,15 +16,20 @@ import (
 // The event was not accepted and the sender should retry.
 var ErrOverloaded = errors.New("ingest queue full")
 
+// priorityType is the event type that must not wait behind the others.
+const priorityType = "fall_warn"
+
 // Journal is the storage the writer commits batches to.
 type Journal interface {
 	AppendBatch(ctx context.Context, events []store.Event) (store.BatchResult, error)
 }
 
 type Config struct {
-	QueueSize      int           // events waiting for the writer
-	BatchSize      int           // maximum events per transaction
-	EnqueueTimeout time.Duration // how long a request waits for queue space
+	QueueSize         int           // ordinary events waiting for the writer
+	PriorityQueueSize int           // fall warnings waiting for the writer
+	BatchSize         int           // maximum events per transaction
+	EnqueueTimeout    time.Duration // how long a request waits for queue space
+	CommitTimeout     time.Duration // how long one batch may take before it fails
 }
 
 type result struct {
@@ -32,29 +38,45 @@ type result struct {
 }
 
 type request struct {
-	event store.Event
-	done  chan result
+	event  store.Event
+	queued time.Time
+	done   chan result
 }
 
+// Writer owns two queues. Fall warnings go to the priority queue, everything
+// else to the normal queue. Each batch takes every waiting fall warning first
+// and only then fills up with ordinary events, so under a burst a fall waits
+// for at most the batch already being committed, never behind the backlog.
+// A full normal queue also cannot cause a fall warning to be refused.
 type Writer struct {
-	journal Journal
-	cfg     Config
-	queue   chan request
+	journal  Journal
+	cfg      Config
+	metrics  *metrics.Service
+	queue    chan request
+	priority chan request
 
 	alarmMu     sync.Mutex
 	alarmSignal chan struct{} // closed and replaced whenever a batch commits new alarms
 }
 
-func NewWriter(journal Journal, cfg Config) *Writer {
-	if cfg.QueueSize < 1 || cfg.BatchSize < 1 || cfg.EnqueueTimeout <= 0 {
-		panic("ingest: QueueSize, BatchSize and EnqueueTimeout must be positive")
+func NewWriter(journal Journal, cfg Config, m *metrics.Service) *Writer {
+	if cfg.QueueSize < 1 || cfg.PriorityQueueSize < 1 || cfg.BatchSize < 1 ||
+		cfg.EnqueueTimeout <= 0 || cfg.CommitTimeout <= 0 {
+		panic("ingest: every Config value must be positive")
 	}
 	return &Writer{
 		journal:     journal,
 		cfg:         cfg,
+		metrics:     m,
 		queue:       make(chan request, cfg.QueueSize),
+		priority:    make(chan request, cfg.PriorityQueueSize),
 		alarmSignal: make(chan struct{}),
 	}
+}
+
+// QueueDepths returns how many events are waiting in each queue.
+func (w *Writer) QueueDepths() (normal, priority int) {
+	return len(w.queue), len(w.priority)
 }
 
 // NewAlarms returns a channel that is closed the next time a batch commits at
@@ -77,11 +99,15 @@ func (w *Writer) announceAlarms() {
 // If ctx ends after the event was queued, the event may still be committed;
 // retrying it is safe because the journal treats it as a duplicate.
 func (w *Writer) Submit(ctx context.Context, e store.Event) (store.Outcome, error) {
-	req := request{event: e, done: make(chan result, 1)}
+	req := request{event: e, queued: time.Now(), done: make(chan result, 1)}
+	queue := w.queue
+	if e.Type == priorityType {
+		queue = w.priority
+	}
 	timer := time.NewTimer(w.cfg.EnqueueTimeout)
 	defer timer.Stop()
 	select {
-	case w.queue <- req:
+	case queue <- req:
 	case <-timer.C:
 		return 0, ErrOverloaded
 	case <-ctx.Done():
@@ -95,28 +121,33 @@ func (w *Writer) Submit(ctx context.Context, e store.Event) (store.Outcome, erro
 	}
 }
 
-// Run commits queued events until ctx ends. It takes one event, adds whatever
-// else is already waiting up to BatchSize, and commits them together. Batches
-// therefore grow on their own under load and stay at one event when idle.
+// Run commits queued events until ctx ends. It waits for one event, adds
+// whatever else is already waiting up to BatchSize, and commits them together.
+// Batches therefore grow on their own under load and stay at one event when idle.
 func (w *Writer) Run(ctx context.Context) {
 	batch := make([]request, 0, w.cfg.BatchSize)
 	for {
 		batch = batch[:0]
 		select {
+		case req := <-w.priority:
+			batch = append(batch, req)
 		case req := <-w.queue:
 			batch = append(batch, req)
 		case <-ctx.Done():
 			return
 		}
-		batch = w.drain(batch)
+		batch = drain(batch, w.priority, w.cfg.BatchSize)
+		batch = drain(batch, w.queue, w.cfg.BatchSize)
+		w.observeQueueWait(batch)
 		w.commit(ctx, batch)
 	}
 }
 
-func (w *Writer) drain(batch []request) []request {
-	for len(batch) < w.cfg.BatchSize {
+// drain appends requests already waiting in queue until the batch is full.
+func drain(batch []request, queue <-chan request, limit int) []request {
+	for len(batch) < limit {
 		select {
-		case req := <-w.queue:
+		case req := <-queue:
 			batch = append(batch, req)
 		default:
 			return batch
@@ -125,13 +156,28 @@ func (w *Writer) drain(batch []request) []request {
 	return batch
 }
 
+func (w *Writer) observeQueueWait(batch []request) {
+	now := time.Now()
+	for _, req := range batch {
+		w.metrics.QueueWaitSeconds.Observe(now.Sub(req.queued).Seconds())
+	}
+}
+
 func (w *Writer) commit(ctx context.Context, batch []request) {
 	events := make([]store.Event, len(batch))
 	for i, req := range batch {
 		events[i] = req.event
 	}
-	committed, err := w.journal.AppendBatch(ctx, events)
+	// A stalled database must fail the batch, not stall the writer forever:
+	// the senders get a retryable error and the next batch gets a fresh try.
+	commitCtx, cancel := context.WithTimeout(ctx, w.cfg.CommitTimeout)
+	started := time.Now()
+	committed, err := w.journal.AppendBatch(commitCtx, events)
+	cancel()
+	w.metrics.BatchCommitSeconds.Observe(time.Since(started).Seconds())
+	w.metrics.BatchSize.Observe(float64(len(batch)))
 	if err != nil && len(batch) > 1 && store.IsUnstorable(err) {
+		w.metrics.BatchSplits.Inc()
 		// One event in the batch holds data the database refuses. Commit each
 		// event on its own so only that event fails and the rest are not
 		// rejected along with it.
@@ -146,8 +192,12 @@ func (w *Writer) commit(ctx context.Context, batch []request) {
 			continue
 		}
 		req.done <- result{outcome: committed.Outcomes[i]}
+		if req.event.Type == priorityType && committed.Outcomes[i] == store.Inserted {
+			w.metrics.AlarmVisibleSeconds.Observe(time.Since(req.queued).Seconds())
+		}
 	}
 	if committed.NewAlarms > 0 {
+		w.metrics.AlarmsCreated.Add(uint64(committed.NewAlarms))
 		w.announceAlarms()
 	}
 }

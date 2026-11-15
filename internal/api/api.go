@@ -3,6 +3,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/junayd-elahi/teton-streaming/internal/ingest"
+	"github.com/junayd-elahi/teton-streaming/internal/metrics"
 	"github.com/junayd-elahi/teton-streaming/internal/store"
 )
 
@@ -24,6 +26,7 @@ const (
 	maxIDLength = 128
 	// maxNumberLength bounds a numeric literal so it always fits the jsonb column.
 	maxNumberLength = 32
+	readyTimeout    = 2 * time.Second
 )
 
 var eventTypes = map[string]bool{
@@ -32,13 +35,14 @@ var eventTypes = map[string]bool{
 }
 
 type Server struct {
-	writer *ingest.Writer
-	store  *store.Store
-	now    func() time.Time
+	writer  *ingest.Writer
+	store   *store.Store
+	metrics *metrics.Service
+	now     func() time.Time
 }
 
-func New(w *ingest.Writer, st *store.Store, now func() time.Time) *Server {
-	return &Server{writer: w, store: st, now: now}
+func New(w *ingest.Writer, st *store.Store, m *metrics.Service, now func() time.Time) *Server {
+	return &Server{writer: w, store: st, metrics: m, now: now}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -47,38 +51,67 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /devices/{device_id}/health", s.getDeviceHealth)
 	mux.HandleFunc("GET /rooms/{room_id}/occupancy", s.getRoomOccupancy)
 	mux.HandleFunc("GET /alarms", s.getAlarms)
+	mux.Handle("GET /metrics", s.metrics.Registry.Handler())
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	})
+	mux.HandleFunc("GET /readyz", s.getReady)
 	return mux
+}
+
+// getReady reports whether the service can do its job right now: the process
+// is up (healthz) and the database answers.
+func (s *Server) getReady(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), readyTimeout)
+	defer cancel()
+	if err := s.store.Ping(ctx); err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ready": false, "error": "database unavailable"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ready": true})
 }
 
 // postEvent responds only after the event is committed, so a 200 is a durable
 // acknowledgement and a retry of the same event is safe.
 func (s *Server) postEvent(w http.ResponseWriter, r *http.Request) {
 	received := s.now()
+	started := time.Now()
+	defer func() { s.metrics.IngestSeconds.Observe(time.Since(started).Seconds()) }()
+
 	event, err := parseEvent(http.MaxBytesReader(w, r.Body, maxBodyBytes), received)
 	if err != nil {
+		s.metrics.EventsReceived.With("invalid").Inc()
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
 	outcome, err := s.writer.Submit(r.Context(), event)
 	switch {
 	case errors.Is(err, ingest.ErrOverloaded):
+		s.metrics.EventsReceived.With("overloaded").Inc()
 		w.Header().Set("Retry-After", "1")
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "overloaded, retry"})
+	case errors.Is(err, context.Canceled):
+		// The sender went away. Nothing to answer; its retry is safe.
 	case store.IsUnstorable(err):
+		s.metrics.EventsReceived.With("unstorable").Inc()
 		slog.Warn("event refused by storage", "device_id", event.DeviceID, "seq", event.Seq, "err", err)
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "event holds a value that cannot be stored"})
 	case err != nil:
+		s.metrics.EventsReceived.With("storage_error").Inc()
 		slog.Error("journal write failed", "err", err)
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable, retry"})
 	case outcome == store.Conflict:
+		s.metrics.EventsReceived.With("conflict").Inc()
 		slog.Warn("identity conflict", "device_id", event.DeviceID, "seq", event.Seq)
 		writeJSON(w, http.StatusConflict, map[string]any{
-			"error": "device_id and seq already used with different content"})
+			"error": "device_id, seq and ts already used with different content"})
+	case outcome == store.Duplicate:
+		s.metrics.EventsReceived.With("duplicate").Inc()
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "duplicate": true})
 	default:
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "duplicate": outcome == store.Duplicate})
+		s.metrics.EventsReceived.With("accepted").Inc()
+		s.metrics.EventsAccepted.With(event.Type).Inc()
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "duplicate": false})
 	}
 }
 
@@ -156,7 +189,7 @@ func parseEvent(body io.Reader, received time.Time) (store.Event, error) {
 		Seq:         seq,
 		RoomID:      roomID,
 		Type:        typ,
-		TS:          ts.UTC(),
+		TS:          ts.UTC().Truncate(time.Microsecond),
 		Payload:     payload,
 		PayloadHash: hash[:],
 		ReceivedAt:  received.UTC(),

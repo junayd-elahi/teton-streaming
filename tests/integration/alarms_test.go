@@ -103,19 +103,22 @@ func TestConcurrentJitterCopiesProduceOneAlarm(t *testing.T) {
 	}
 }
 
-// The snapshot is ordered by event time and filtered by since, given either as
-// unix seconds or as a timestamp.
-func TestSnapshotIsOrderedByEventTimeAndFilteredBySince(t *testing.T) {
+// The snapshot is ordered by event time. since filters on when the service
+// received the fall, so a late fall is returned to a poller that passes its
+// last poll time. since is unix seconds or a timestamp.
+func TestSnapshotIsOrderedByEventTimeAndFilteredByReceiptTime(t *testing.T) {
 	svc := startService(t)
 	defer svc.stop()
 	reset(t, svc)
 
+	svc.clock = time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
 	mustPost(t, svc, fallAt("dev_f1", "room_f", 1, "2026-11-15T11:50:00.000Z", 0.9))
-	mustPost(t, svc, fallAt("dev_f1", "room_f", 2, "2026-11-15T11:30:00.000Z", 0.9)) // arrives second, happened first
-	mustPost(t, svc, fallAt("dev_f1", "room_f", 3, "2026-11-15T11:40:00.000Z", 0.9))
+	svc.clock = time.Date(2026, 11, 15, 12, 10, 0, 0, time.UTC)
+	mustPost(t, svc, fallAt("dev_f1", "room_f", 2, "2026-11-15T11:30:00.000Z", 0.9)) // late: happened first, received last
+	mustPost(t, svc, fallAt("dev_f1", "room_f", 3, "2026-11-15T12:09:00.000Z", 0.9))
 
 	all := alarmsFrom(t, svc, "since=0").Alarms
-	order := []string{"2026-11-15T11:30:00.000Z", "2026-11-15T11:40:00.000Z", "2026-11-15T11:50:00.000Z"}
+	order := []string{"2026-11-15T11:30:00.000Z", "2026-11-15T11:50:00.000Z", "2026-11-15T12:09:00.000Z"}
 	if len(all) != 3 {
 		t.Fatalf("%d alarms, want 3", len(all))
 	}
@@ -125,10 +128,13 @@ func TestSnapshotIsOrderedByEventTimeAndFilteredBySince(t *testing.T) {
 		}
 	}
 
-	cutoff := time.Date(2026, 11, 15, 11, 40, 0, 0, time.UTC)
-	for _, since := range []string{fmt.Sprint(cutoff.Unix()), "2026-11-15T11:40:00.000Z"} {
-		if got := len(alarmsFrom(t, svc, "since="+since).Alarms); got != 2 {
-			t.Errorf("since=%s: %d alarms, want 2", since, got)
+	// A poller that last looked at 12:05:00 gets both falls received after
+	// that, including the one that happened at 11:30.
+	lastPoll := time.Date(2026, 11, 15, 12, 5, 0, 0, time.UTC)
+	for _, since := range []string{fmt.Sprint(lastPoll.Unix()), "2026-11-15T12:05:00.000Z"} {
+		got := alarmsFrom(t, svc, "since="+since).Alarms
+		if len(got) != 2 || got[0].TS != "2026-11-15T11:30:00.000Z" || got[1].TS != "2026-11-15T12:09:00.000Z" {
+			t.Errorf("since=%s: got %+v, want the 11:30 and 12:09 falls", since, got)
 		}
 	}
 	var body map[string]any

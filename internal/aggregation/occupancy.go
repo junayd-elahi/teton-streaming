@@ -20,8 +20,10 @@ type Occupancy struct {
 //
 // predecessor is the last transition at or before start, or nil when the room
 // has no earlier history; the span before the first transition is then unknown
-// and counts as neither occupied nor absent. transitions must lie in
-// (start, end] and be in event-time order.
+// and counts as neither occupied nor absent. transitions must be after start
+// and in event-time order. A transition dated after end (a device whose clock
+// runs ahead) adds no time to the window but still sets the final state, so
+// the latest presence event always decides InRoom.
 func IntegrateOccupancy(start, end time.Time, predecessor *Transition, transitions []Transition) Occupancy {
 	var result Occupancy
 	known := predecessor != nil
@@ -39,10 +41,17 @@ func IntegrateOccupancy(start, end time.Time, predecessor *Transition, transitio
 		cursor = to
 	}
 	for _, t := range transitions {
-		advance(t.At)
+		advance(earliest(t.At, end))
 		known, inRoom = true, t.InRoom
 	}
 	advance(end)
 	result.InRoom = inRoom
 	return result
+}
+
+func earliest(a, b time.Time) time.Time {
+	if a.Before(b) {
+		return a
+	}
+	return b
 }

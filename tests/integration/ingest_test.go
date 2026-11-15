@@ -17,6 +17,7 @@ import (
 
 	"github.com/junayd-elahi/teton-streaming/internal/api"
 	"github.com/junayd-elahi/teton-streaming/internal/ingest"
+	"github.com/junayd-elahi/teton-streaming/internal/metrics"
 	"github.com/junayd-elahi/teton-streaming/internal/store"
 	"github.com/junayd-elahi/teton-streaming/migrations"
 )
@@ -54,11 +55,19 @@ func startService(t *testing.T) *service {
 		t.Fatal(err)
 	}
 	writerCtx, stopWriter := context.WithCancel(ctx)
-	writer := ingest.NewWriter(st, ingest.Config{QueueSize: 1000, BatchSize: 100, EnqueueTimeout: 2 * time.Second})
+	var writer *ingest.Writer
+	m := metrics.NewService(
+		func() int64 { normal, _ := writer.QueueDepths(); return int64(normal) },
+		func() int64 { _, priority := writer.QueueDepths(); return int64(priority) },
+		time.Now)
+	writer = ingest.NewWriter(st, ingest.Config{
+		QueueSize: 1000, PriorityQueueSize: 1000, BatchSize: 100,
+		EnqueueTimeout: 2 * time.Second, CommitTimeout: 5 * time.Second,
+	}, m)
 	go writer.Run(writerCtx)
 
 	svc := &service{store: st, writer: writer, stopWriter: stopWriter, clock: fixedNow}
-	handler := api.New(writer, st, func() time.Time { return svc.clock }).Handler()
+	handler := api.New(writer, st, m, func() time.Time { return svc.clock }).Handler()
 	svc.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !svc.dropNextResponse {
 			handler.ServeHTTP(w, r)
@@ -342,5 +351,23 @@ func TestRetryAfterLostResponseIsDuplicate(t *testing.T) {
 	}
 	if got := count(t, svc); got != 1 {
 		t.Fatalf("after retry: %d events, want 1", got)
+	}
+}
+
+// A device restarts and reuses sequence number 1 for a later event. The
+// timestamp differs, so it is a new event and not a conflict.
+func TestReusedSequenceNumberWithNewTimestampIsANewEvent(t *testing.T) {
+	svc := startService(t)
+	defer svc.stop()
+	reset(t, svc)
+
+	later := strings.Replace(heartbeat, "11:59:59.500Z", "11:59:59.900Z", 1)
+	first := postReply(t, svc, heartbeat)
+	second := postReply(t, svc, later)
+	if first.status != http.StatusOK || second.status != http.StatusOK || second.duplicate {
+		t.Fatalf("got %+v then %+v, want two new events", first, second)
+	}
+	if got := count(t, svc); got != 2 {
+		t.Fatalf("%d events, want 2", got)
 	}
 }
