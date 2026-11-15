@@ -183,6 +183,16 @@ So this run does not show what the service can do on eight cores. The best measu
 
 Best measured burst rate on an 8-core Windows PC, everything inside Docker Desktop's 4-CPU VM including the load generator: about 11,000 events/s, against a 50,000 events/s target. Scheduled work that the generator did not send is not service overload. No sent request was refused, every acknowledged event was journaled, and no acknowledged alarm was missing in these runs. Earlier 119 to 280 ms alarm p95 figures need confirmation with the separate listener connection pool. Shared CPU and the one-request-per-event workload are possible constraints; the service's independent ceiling has not been established. A fairer test uses a separate load-generator machine.
 
+### Confirming run on the PC with the hardened build and corrected listener (15 Nov 2026)
+
+Same shape and setup as the earlier in-Docker runs: 5,000/s baseline with a 30 s burst at 50,000/s, 1,000 senders, everything inside Docker Desktop's 4-CPU VM.
+
+| Scheduled | Accepted | Never sent | HTTP or transport errors | Request p50 / p95 | Fall first-send-to-feed p50 / p95 / max | Acknowledged falls on feed |
+|---|---|---|---|---|---|---|
+| 1,650,000 | 547,327 (9,121/s average, about 13,200/s during the burst) | 1,102,673 | 0 | 58 ms / 126 ms | 22 ms / 67 ms / 246 ms | 7,165 of 7,165, none duplicated |
+
+This is the first alarm-latency figure on this machine taken with the listener on its own connection, so it replaces the earlier 119 to 280 ms figures. Falls reached the feed in well under half the time an ordinary request took to complete. The run was diagnostic: no pass or fail thresholds were requested, and the percentiles cover the whole run, not the burst alone. The 50,000/s target remains unmet on this setup.
+
 ### Independent candidate confirmation (15 Nov 2026)
 
 A local hardening candidate based on `fe1a52c9e25344446938facc8c65efedb16dd681` preserves the separate feed-client pool, four ordinary writer lanes, the dedicated fall lane, and 5 ms ordinary linger. Server, PostgreSQL 16.2 and the load tool shared a Linux environment whose Go runtime reported nine CPUs; this is not a controlled comparison with the Windows PC.
