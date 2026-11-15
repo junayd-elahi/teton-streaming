@@ -151,7 +151,23 @@ Findings from these runs:
 - **One statement per batch.** A batch used four round trips: begin, insert, read back every row to see which were new, commit. The insert now returns the identities it inserted, in a single atomic statement, and the stored hash is only looked up for events that were already journaled (retries). On the sandbox, the same load went from 9,800/s to 14,900/s.
 - **Parallel writers.** Ordinary events are spread over `INGEST_WRITERS` lanes by device, so PostgreSQL can work on several batches at once and each device's events still commit in order. Fall warnings keep a lane and a writer of their own. That writer is the only one that creates alarms, which keeps alarm ids becoming visible in increasing order for the feed cursor. The 2-core sandbox shows no gain from this (it has no spare core); the 8-core PC should.
 
-The rerun on the PC with these changes is pending.
+### Rerun on the PC after those changes
+
+| Run | Accepted | Refused | Request p95 | Fall to feed p50 / p95 | Falls missing |
+|---|---|---|---|---|---|
+| In Docker's network, 2,000 senders | 484,727 (8,078/s average, about 11,200/s during the burst) | 0 | 338 ms | 67 ms / 280 ms | 0 of 6,446 |
+
+Throughput did not move, so on this machine the writers were no longer the limit. The service's metrics for the run:
+
+- 53,369 batches averaging 9 events, 4.75 ms each. The database was being handed many tiny batches.
+- A request took 82 ms on average inside the service, of which 24 ms was waiting in a queue and 5 ms was the commit. The other 53 ms was time waiting for a CPU: the VM's four CPUs are shared by PostgreSQL, the service and a load tool holding 2,000 connections.
+- Falls reached the feed faster than ordinary requests completed (67 ms against 119 ms at the median), which is the dedicated fall writer doing its job.
+
+One more change followed from the tiny batches: ordinary lanes now wait up to `INGEST_LINGER_MS` (5 ms) for a batch to fill, because a commit costs one statement and one disk flush whatever its size. On the sandbox this cut total database commit time for the same load by 30% (91 s to 64 s) with unchanged throughput, since the CPU is the limit there too. The fall lane never lingers.
+
+### Where this leaves the burst target
+
+Measured ceiling on an 8-core Windows PC, everything inside Docker Desktop's 4-CPU VM including the load generator: about 11,000 events/s, against a 50,000 events/s target. At roughly four times overload, nothing was refused, every acknowledged event was journaled, no alarm was lost, and alarms arrived in 119 to 280 ms at the 95th percentile. The limit is CPU shared with the load generator, and one HTTP request per event. A fair test of the target needs the load generator on a separate machine.
 
 ## Run
 
