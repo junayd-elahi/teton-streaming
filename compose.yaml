@@ -6,7 +6,8 @@ services:
       POSTGRES_PASSWORD: teton
       POSTGRES_DB: teton
     ports:
-      - "5432:5432"
+      # Local only: the database is for the server and for running tests on this machine.
+      - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:

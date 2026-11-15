@@ -43,8 +43,19 @@ func run() error {
 	writer := ingest.NewWriter(st, cfg)
 	go writer.Run(ctx)
 
+	server := &http.Server{
+		Addr:    listenAddr,
+		Handler: api.New(writer, st, time.Now).Handler(),
+		// Bound how long a client may take to send a request, so slow or idle
+		// connections cannot pile up. WriteTimeout must exceed the 30 s maximum
+		// long-poll wait of the alarm feed.
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      40 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
 	slog.Info("listening", "addr", listenAddr)
-	return http.ListenAndServe(listenAddr, api.New(writer, st, time.Now).Handler())
+	return server.ListenAndServe()
 }
 
 func mustEnv(key string) string {
