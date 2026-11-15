@@ -3,6 +3,7 @@ package ingest
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"sync"
 	"testing"
@@ -21,7 +22,7 @@ func testMetrics() *metrics.Service {
 // With no writer running, the queue of one fills and the next submit must fail
 // visibly as overloaded instead of waiting forever.
 func TestSubmitReportsOverloadWhenQueueStaysFull(t *testing.T) {
-	w := NewWriter(nil, Config{QueueSize: 1, PriorityQueueSize: 1, BatchSize: 1, EnqueueTimeout: 20 * time.Millisecond, CommitTimeout: time.Second}, testMetrics())
+	w := NewWriter(nil, Config{Writers: 1, QueueSize: 1, PriorityQueueSize: 1, BatchSize: 1, EnqueueTimeout: 20 * time.Millisecond, CommitTimeout: time.Second}, testMetrics())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	first := make(chan error, 1)
@@ -29,7 +30,7 @@ func TestSubmitReportsOverloadWhenQueueStaysFull(t *testing.T) {
 		_, err := w.Submit(ctx, store.Event{})
 		first <- err
 	}()
-	for len(w.queue) == 0 {
+	for normal, _ := w.QueueDepths(); normal == 0; normal, _ = w.QueueDepths() {
 		time.Sleep(time.Millisecond)
 	}
 
@@ -63,7 +64,7 @@ func (j *refusingJournal) AppendBatch(_ context.Context, events []store.Event) (
 // must refuse only that one and commit the other four.
 func TestWriterRefusesOnlyTheUnstorableEventInABatch(t *testing.T) {
 	journal := &refusingJournal{}
-	w := NewWriter(journal, Config{QueueSize: 10, PriorityQueueSize: 10, BatchSize: 10, EnqueueTimeout: time.Second, CommitTimeout: time.Second}, testMetrics())
+	w := NewWriter(journal, Config{Writers: 1, QueueSize: 10, PriorityQueueSize: 10, BatchSize: 10, EnqueueTimeout: time.Second, CommitTimeout: time.Second}, testMetrics())
 
 	seqs := []int64{11, 12, 13, 14, 15}
 	errs := make(map[int64]error)
@@ -79,7 +80,7 @@ func TestWriterRefusesOnlyTheUnstorableEventInABatch(t *testing.T) {
 			mu.Unlock()
 		}()
 	}
-	for len(w.queue) < len(seqs) {
+	for normal, _ := w.QueueDepths(); normal < len(seqs); normal, _ = w.QueueDepths() {
 		time.Sleep(time.Millisecond)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -140,44 +141,82 @@ func submitAll(t *testing.T, w *Writer, events []store.Event) *sync.WaitGroup {
 	}
 }
 
-// Twelve heartbeats are queued, then two fall warnings. With batches of five,
-// both falls must be in the first batch although they arrived last.
-func TestFallWarningsJumpTheBacklog(t *testing.T) {
-	journal := &recordingJournal{}
-	w := NewWriter(journal, Config{QueueSize: 20, PriorityQueueSize: 20, BatchSize: 5, EnqueueTimeout: time.Second, CommitTimeout: time.Second}, testMetrics())
+// gatedJournal holds back every batch that contains a heartbeat until release
+// is closed, like a database busy with a backlog of ordinary events.
+type gatedJournal struct {
+	release chan struct{}
+}
 
-	var events []store.Event
-	for seq := int64(1); seq <= 12; seq++ {
-		events = append(events, store.Event{Seq: seq, Type: "heartbeat"})
+func (j *gatedJournal) AppendBatch(_ context.Context, events []store.Event) (store.BatchResult, error) {
+	for _, e := range events {
+		if e.Type == "heartbeat" {
+			<-j.release
+			break
+		}
 	}
-	events = append(events, store.Event{Seq: 101, Type: "fall_warn"}, store.Event{Seq: 102, Type: "fall_warn"})
-	wg := submitAll(t, w, events)
+	return store.BatchResult{Outcomes: make([]store.Outcome, len(events))}, nil
+}
 
+// Every ordinary writer is stuck on a slow commit with more heartbeats queued
+// behind it. A fall warning sent now must still be committed straight away.
+func TestFallWarningIsNotDelayedByBusyOrdinaryWriters(t *testing.T) {
+	journal := &gatedJournal{release: make(chan struct{})}
+	w := NewWriter(journal, Config{Writers: 2, QueueSize: 20, PriorityQueueSize: 20, BatchSize: 5, EnqueueTimeout: time.Second, CommitTimeout: time.Minute}, testMetrics())
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go w.Run(ctx)
-	wg.Wait()
 
-	journal.mu.Lock()
-	defer journal.mu.Unlock()
-	falls := 0
-	for _, e := range journal.batches[0] {
-		if e.Type == "fall_warn" {
-			falls++
+	var heartbeats sync.WaitGroup
+	for seq := int64(1); seq <= 12; seq++ {
+		heartbeats.Add(1)
+		go func() {
+			defer heartbeats.Done()
+			w.Submit(context.Background(), store.Event{DeviceID: fmt.Sprintf("dev_%d", seq), Seq: seq, Type: "heartbeat"})
+		}()
+	}
+	time.Sleep(50 * time.Millisecond) // let both ordinary writers pick up a batch and block
+
+	fall := make(chan error, 1)
+	go func() {
+		_, err := w.Submit(context.Background(), store.Event{DeviceID: "dev_1", Seq: 101, Type: "fall_warn"})
+		fall <- err
+	}()
+	select {
+	case err := <-fall:
+		if err != nil {
+			t.Fatalf("fall warning: %v", err)
 		}
+	case <-time.After(time.Second):
+		t.Fatal("fall warning waited behind the ordinary backlog")
 	}
-	if falls != 2 {
-		t.Fatalf("first batch holds %d fall warnings, want 2 (batch: %+v)", falls, journal.batches[0])
+	close(journal.release)
+	heartbeats.Wait()
+}
+
+// The same device always uses the same lane, so its events keep their order.
+func TestADeviceAlwaysUsesTheSameLane(t *testing.T) {
+	w := NewWriter(nil, Config{Writers: 8, QueueSize: 1, PriorityQueueSize: 1, BatchSize: 1, EnqueueTimeout: time.Second, CommitTimeout: time.Second}, testMetrics())
+	used := map[chan request]bool{}
+	for device := 0; device < 200; device++ {
+		id := fmt.Sprintf("dev_%04d", device)
+		first := w.laneFor(store.Event{DeviceID: id, Type: "heartbeat"})
+		if again := w.laneFor(store.Event{DeviceID: id, Type: "motion"}); again != first {
+			t.Fatalf("%s mapped to two different lanes", id)
+		}
+		used[first] = true
 	}
-	if len(journal.batches[0]) != 5 {
-		t.Fatalf("first batch has %d events, want a full batch of 5", len(journal.batches[0]))
+	if len(used) != 8 {
+		t.Fatalf("200 devices used %d of 8 lanes, want all 8", len(used))
+	}
+	if w.laneFor(store.Event{DeviceID: "dev_0001", Type: "fall_warn"}) != w.priority {
+		t.Fatal("a fall warning did not go to the priority lane")
 	}
 }
 
 // A full normal queue must not cause a fall warning to be refused.
 func TestFallWarningIsAcceptedWhileNormalQueueIsFull(t *testing.T) {
 	journal := &recordingJournal{}
-	w := NewWriter(journal, Config{QueueSize: 1, PriorityQueueSize: 1, BatchSize: 5, EnqueueTimeout: 20 * time.Millisecond, CommitTimeout: time.Second}, testMetrics())
+	w := NewWriter(journal, Config{Writers: 1, QueueSize: 1, PriorityQueueSize: 1, BatchSize: 5, EnqueueTimeout: 20 * time.Millisecond, CommitTimeout: time.Second}, testMetrics())
 
 	wg := submitAll(t, w, []store.Event{{Seq: 1, Type: "heartbeat"}})
 	if _, err := w.Submit(context.Background(), store.Event{Seq: 2, Type: "heartbeat"}); !errors.Is(err, ErrOverloaded) {
@@ -209,7 +248,7 @@ func (stalledJournal) AppendBatch(ctx context.Context, _ []store.Event) (store.B
 // A stalled database fails the batch after the commit timeout, and the writer
 // keeps serving later events.
 func TestStalledCommitFailsAfterTimeoutAndWriterKeepsRunning(t *testing.T) {
-	w := NewWriter(stalledJournal{}, Config{QueueSize: 5, PriorityQueueSize: 5, BatchSize: 5, EnqueueTimeout: time.Second, CommitTimeout: 50 * time.Millisecond}, testMetrics())
+	w := NewWriter(stalledJournal{}, Config{Writers: 1, QueueSize: 5, PriorityQueueSize: 5, BatchSize: 5, EnqueueTimeout: time.Second, CommitTimeout: 50 * time.Millisecond}, testMetrics())
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go w.Run(ctx)

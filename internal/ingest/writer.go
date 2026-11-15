@@ -1,10 +1,11 @@
-// Package ingest serialises journal writes through bounded queues and one
-// batching writer, so journal order equals commit order.
+// Package ingest moves accepted events into the journal through bounded
+// queues and a small set of batching writers.
 package ingest
 
 import (
 	"context"
 	"errors"
+	"hash/fnv"
 	"sync"
 	"time"
 
@@ -25,8 +26,9 @@ type Journal interface {
 }
 
 type Config struct {
-	QueueSize         int           // ordinary events waiting for the writer
-	PriorityQueueSize int           // fall warnings waiting for the writer
+	Writers           int           // parallel writers for ordinary events
+	QueueSize         int           // ordinary events waiting, per writer
+	PriorityQueueSize int           // fall warnings waiting for their writer
 	BatchSize         int           // maximum events per transaction
 	EnqueueTimeout    time.Duration // how long a request waits for queue space
 	CommitTimeout     time.Duration // how long one batch may take before it fails
@@ -43,16 +45,22 @@ type request struct {
 	done   chan result
 }
 
-// Writer owns two queues. Fall warnings go to the priority queue, everything
-// else to the normal queue. Each batch takes every waiting fall warning first
-// and only then fills up with ordinary events, so under a burst a fall waits
-// for at most the batch already being committed, never behind the backlog.
-// A full normal queue also cannot cause a fall warning to be refused.
+// Writer runs Writers lanes for ordinary events and one lane for fall warnings.
+//
+// A device always maps to the same ordinary lane, so its events are committed
+// in the order they arrived, and several lanes let PostgreSQL work on several
+// batches at once.
+//
+// Fall warnings never share a lane with anything else. They are committed by
+// their own writer as soon as they arrive, so a burst of other events cannot
+// delay an alarm or cause one to be refused. That writer is also the only one
+// that creates alarms, which is what keeps alarm ids becoming visible in
+// increasing order for the feed cursor.
 type Writer struct {
 	journal  Journal
 	cfg      Config
 	metrics  *metrics.Service
-	queue    chan request
+	lanes    []chan request
 	priority chan request
 
 	alarmMu     sync.Mutex
@@ -60,23 +68,41 @@ type Writer struct {
 }
 
 func NewWriter(journal Journal, cfg Config, m *metrics.Service) *Writer {
-	if cfg.QueueSize < 1 || cfg.PriorityQueueSize < 1 || cfg.BatchSize < 1 ||
+	if cfg.Writers < 1 || cfg.QueueSize < 1 || cfg.PriorityQueueSize < 1 || cfg.BatchSize < 1 ||
 		cfg.EnqueueTimeout <= 0 || cfg.CommitTimeout <= 0 {
 		panic("ingest: every Config value must be positive")
+	}
+	lanes := make([]chan request, cfg.Writers)
+	for i := range lanes {
+		lanes[i] = make(chan request, cfg.QueueSize)
 	}
 	return &Writer{
 		journal:     journal,
 		cfg:         cfg,
 		metrics:     m,
-		queue:       make(chan request, cfg.QueueSize),
+		lanes:       lanes,
 		priority:    make(chan request, cfg.PriorityQueueSize),
 		alarmSignal: make(chan struct{}),
 	}
 }
 
-// QueueDepths returns how many events are waiting in each queue.
+// QueueDepths returns how many events are waiting: ordinary events across all
+// lanes, and fall warnings.
 func (w *Writer) QueueDepths() (normal, priority int) {
-	return len(w.queue), len(w.priority)
+	for _, lane := range w.lanes {
+		normal += len(lane)
+	}
+	return normal, len(w.priority)
+}
+
+// laneFor picks the lane an event waits in.
+func (w *Writer) laneFor(e store.Event) chan request {
+	if e.Type == priorityType {
+		return w.priority
+	}
+	h := fnv.New32a()
+	h.Write([]byte(e.DeviceID))
+	return w.lanes[h.Sum32()%uint32(len(w.lanes))]
 }
 
 // NewAlarms returns a channel that is closed the next time a batch commits at
@@ -100,10 +126,7 @@ func (w *Writer) announceAlarms() {
 // retrying it is safe because the journal treats it as a duplicate.
 func (w *Writer) Submit(ctx context.Context, e store.Event) (store.Outcome, error) {
 	req := request{event: e, queued: time.Now(), done: make(chan result, 1)}
-	queue := w.queue
-	if e.Type == priorityType {
-		queue = w.priority
-	}
+	queue := w.laneFor(e)
 	timer := time.NewTimer(w.cfg.EnqueueTimeout)
 	defer timer.Stop()
 	select {
@@ -121,23 +144,34 @@ func (w *Writer) Submit(ctx context.Context, e store.Event) (store.Outcome, erro
 	}
 }
 
-// Run commits queued events until ctx ends. It waits for one event, adds
-// whatever else is already waiting up to BatchSize, and commits them together.
-// Batches therefore grow on their own under load and stay at one event when idle.
+// Run starts one writer per lane and returns when ctx ends.
 func (w *Writer) Run(ctx context.Context) {
+	var wg sync.WaitGroup
+	for _, lane := range append([]chan request{w.priority}, w.lanes...) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			w.runLane(ctx, lane)
+		}()
+	}
+	wg.Wait()
+}
+
+// runLane commits one lane's events until ctx ends. It waits for one event,
+// adds whatever else is already waiting up to BatchSize, and commits them
+// together. Batches therefore grow on their own under load and stay at one
+// event when idle.
+func (w *Writer) runLane(ctx context.Context, lane <-chan request) {
 	batch := make([]request, 0, w.cfg.BatchSize)
 	for {
 		batch = batch[:0]
 		select {
-		case req := <-w.priority:
-			batch = append(batch, req)
-		case req := <-w.queue:
+		case req := <-lane:
 			batch = append(batch, req)
 		case <-ctx.Done():
 			return
 		}
-		batch = drain(batch, w.priority, w.cfg.BatchSize)
-		batch = drain(batch, w.queue, w.cfg.BatchSize)
+		batch = drain(batch, lane, w.cfg.BatchSize)
 		w.observeQueueWait(batch)
 		w.commit(ctx, batch)
 	}

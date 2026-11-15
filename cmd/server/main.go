@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -15,6 +16,9 @@ import (
 	"github.com/junayd-elahi/teton-streaming/migrations"
 )
 
+// minReadConns is the number of pool connections kept free of writers.
+const minReadConns = 2
+
 func main() {
 	if err := run(); err != nil {
 		slog.Error("fatal", "err", err)
@@ -26,6 +30,7 @@ func run() error {
 	databaseURL := mustEnv("DATABASE_URL")
 	listenAddr := mustEnv("LISTEN_ADDR")
 	cfg := ingest.Config{
+		Writers:           mustEnvInt("INGEST_WRITERS"),
 		QueueSize:         mustEnvInt("INGEST_QUEUE_SIZE"),
 		PriorityQueueSize: mustEnvInt("INGEST_PRIORITY_QUEUE_SIZE"),
 		BatchSize:         mustEnvInt("INGEST_BATCH_SIZE"),
@@ -41,6 +46,11 @@ func run() error {
 	defer st.Close()
 	if err := st.Migrate(ctx, migrations.Files); err != nil {
 		return err
+	}
+	// Every writer holds a connection while it commits. Leave some for reads.
+	if needed := cfg.Writers + 1 + minReadConns; st.MaxConns() < needed {
+		return fmt.Errorf("database pool has %d connections, need at least %d for %d writers: set pool_max_conns in DATABASE_URL",
+			st.MaxConns(), needed, cfg.Writers)
 	}
 
 	// The metrics read the queue depths from the writer, and the writer
