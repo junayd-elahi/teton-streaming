@@ -52,6 +52,28 @@ Verified:
 - Teton's smoke evaluator, 50 devices: 1,464 sent, 0 failed, both read endpoints answer. Alarms are still missing.
 - Both read queries use index-only scans.
 
+## Phase 4: fall alarms and resumable feed (done 15 Nov 2026)
+
+- One logical fall = one row in `alarms`, keyed by device, room, event time and confidence. Jitter copies carry new sequence numbers but the same four values, so they collapse. All copies stay in the journal.
+- The alarm is created in the same transaction as its event, by the single journal writer. There is no separate worker or checkpoint: an acknowledged fall always has its alarm, and a crash can never leave one without the other.
+- `alarms.id` is the feed cursor. Because one writer commits batches one at a time, ids become visible in increasing order, so a consumer at cursor N cannot miss a later alarm.
+- `GET /alarms?since=<ts>` is a snapshot ordered by event time. `since` is unix seconds or a timestamp.
+- `GET /alarms?after_id=<cursor>&wait=<seconds>` is the feed, in commit order, long-polling up to 30 s. The writer wakes waiting consumers when a batch commits a new alarm.
+- Consumers may see an alarm twice if they disconnect before saving the cursor; `alarm_id` makes that harmless.
+
+Known limits, chosen on purpose:
+
+- The brief asks for the feed "in order per room". The feed is in commit order, which equals event order per room except when a fall arrives late. A late fall is delivered as soon as it commits, with its original `ts`, instead of being held back or dropped. Sub-second delivery, hour-late arrivals and strict event order cannot all hold at once.
+- Two real falls from one device with the same millisecond timestamp and the same confidence would merge. Falls a few seconds apart with different timestamps stay separate; merging those would need a time-window heuristic the brief does not define.
+
+Verified:
+
+- Three jitter copies plus an exact retry: 3 journaled events, 1 alarm. 30 simultaneous copies: 1 alarm.
+- Falls differing in time, device or confidence: separate alarms.
+- Cursor saved, service restarted, new falls sent including one with an older event time and a jitter copy: resume returns exactly the two new alarms, in commit order.
+- Long poll answers within a second of a fall being sent; an empty wait returns after the wait.
+- Teton's generator, adversarial mode, 300 devices, service hard-killed and restarted mid-run: 22,606 acknowledged, 22,606 journaled, 289 distinct falls among them, 289 alarms. The generator does not retry, so the 272 requests it sent while the service was down are not in the journal.
+
 ## Run
 
 ```bash
@@ -63,4 +85,4 @@ go test -race -count=1 -p 1 ./...
 
 ## Deferred
 
-Alarm deduplication and feed, readiness endpoint, metrics, load measurement.
+Readiness endpoint, metrics, overload behaviour, load measurement.

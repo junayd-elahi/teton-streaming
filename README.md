@@ -1,6 +1,6 @@
 # Teton streaming backend
 
-A streaming backend for room-sensor events: it ingests device messages, journals them durably in PostgreSQL, and serves device health and room occupancy from them. Deduplicated fall alarms are next.
+A streaming backend for room-sensor events: it ingests device messages, journals them durably in PostgreSQL, and serves device health, room occupancy and deduplicated fall alarms from them.
 
 This is my solution to [Teton's real-time streaming backend challenge](https://github.com/Teton-ai/careers-challenge-streaming-backend). The problem statement, event schema, event generator and evaluator all live in their repository and are not copied here.
 
@@ -16,7 +16,8 @@ Work in progress.
 | Bounded queue with one batching writer | Done |
 | Device health over 5 minutes (`GET /devices/{id}/health`) | Done |
 | Room occupancy over 1m, 5m, 1h (`GET /rooms/{id}/occupancy`) | Done |
-| Fall alarms and resumable alarm feed | Not started |
+| Deduplicated fall alarms (`GET /alarms?since=`) | Done |
+| Resumable long-poll alarm feed (`GET /alarms?after_id=&wait=`) | Done |
 | Crash, overload and load measurements | Not started |
 
 ## How ingestion works
@@ -38,6 +39,13 @@ Health and occupancy are computed at read time from the journal, by the device's
 curl localhost:8080/devices/dev_0001/health
 curl "localhost:8080/rooms/room_001/occupancy?window=5m"
 ```
+
+## How alarms work
+
+A sensor can report one fall several times. Reports with the same device, room, timestamp and confidence become one alarm, created in the same transaction as the event, so an acknowledged fall always has its alarm.
+
+- `GET /alarms?since=0` returns all alarms ordered by event time.
+- `GET /alarms?after_id=<cursor>&wait=10` is the live feed. It answers as soon as a new alarm commits, or with an empty list after the wait. Pass the returned `next_cursor` as `after_id` next time. The cursor survives disconnects and restarts, and a fall that arrives late is still delivered.
 
 ## Stack
 
@@ -83,5 +91,5 @@ python3 event_generator/generate.py --mode adversarial --target http://localhost
 | `internal/aggregation/` | Pure window calculations |
 | `internal/store/` | PostgreSQL journal and migrations runner |
 | `migrations/` | Versioned schema |
-| `tests/integration/` | Restart, replay, concurrency, conflict and fixed-clock read tests |
+| `tests/integration/` | Restart, replay, concurrency, conflict, fixed-clock read and alarm feed tests |
 | `NOTES.md` | Design decisions and what has been verified |
