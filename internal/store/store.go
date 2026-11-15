@@ -4,12 +4,16 @@ package store
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"sort"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/junayd-elahi/teton-streaming/internal/aggregation"
 )
 
 // Event is one validated source event ready to be journaled.
@@ -206,4 +210,60 @@ func (s *Store) CountEvents(ctx context.Context) (int64, error) {
 func (s *Store) Reset(ctx context.Context) error {
 	_, err := s.pool.Exec(ctx, `TRUNCATE event_log RESTART IDENTITY`)
 	return err
+}
+
+// HeartbeatWindow is the length of the device availability window.
+const HeartbeatWindow = 300 * time.Second
+
+// DeviceHealth returns the latest heartbeat at or before `at`, and how many
+// distinct one-second slots of (at - 5 minutes, at] contain a heartbeat. Slots
+// are counted back from `at`, so there are exactly 300 of them. Both use the
+// device's own event time.
+func (s *Store) DeviceHealth(ctx context.Context, deviceID string, at time.Time) (last *time.Time, slots int, err error) {
+	err = s.pool.QueryRow(ctx, `
+		SELECT
+			(SELECT max(ts) FROM event_log
+			 WHERE type = 'heartbeat' AND device_id = $1 AND ts <= $2),
+			(SELECT count(DISTINCT floor(extract(epoch FROM ($2::timestamptz - ts))))
+			 FROM event_log
+			 WHERE type = 'heartbeat' AND device_id = $1
+			   AND ts > $2::timestamptz - make_interval(secs => $3) AND ts <= $2)`,
+		deviceID, at, HeartbeatWindow.Seconds()).Scan(&last, &slots)
+	return last, slots, err
+}
+
+// PresenceTimeline returns the room's last presence transition at or before
+// start (nil if none) and every transition in (start, end], ordered by event
+// time, then device_id, then seq.
+func (s *Store) PresenceTimeline(ctx context.Context, roomID string, start, end time.Time) (*aggregation.Transition, []aggregation.Transition, error) {
+	var predecessor *aggregation.Transition
+	var p aggregation.Transition
+	err := s.pool.QueryRow(ctx, `
+		SELECT ts, (payload->>'in_room')::boolean FROM event_log
+		WHERE type = 'presence' AND room_id = $1 AND ts <= $2
+		ORDER BY ts DESC, device_id DESC, seq DESC
+		LIMIT 1`, roomID, start).Scan(&p.At, &p.InRoom)
+	switch {
+	case err == nil:
+		predecessor = &p
+	case !errors.Is(err, pgx.ErrNoRows):
+		return nil, nil, err
+	}
+
+	rows, err := s.pool.Query(ctx, `
+		SELECT ts, (payload->>'in_room')::boolean FROM event_log
+		WHERE type = 'presence' AND room_id = $1 AND ts > $2 AND ts <= $3
+		ORDER BY ts, device_id, seq`, roomID, start, end)
+	if err != nil {
+		return nil, nil, err
+	}
+	transitions, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (aggregation.Transition, error) {
+		var t aggregation.Transition
+		err := row.Scan(&t.At, &t.InRoom)
+		return t, err
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return predecessor, transitions, nil
 }
