@@ -223,7 +223,13 @@ func validateStorable(value any) error {
 		if len(v) > maxNumberLength {
 			return fmt.Errorf("number literals must be at most %d characters", maxNumberLength)
 		}
-		if _, err := v.Float64(); err != nil {
+		f, err := v.Float64()
+		if err != nil {
+			return errors.New("number is out of range")
+		}
+		// A literal such as 1e-400 parses to zero without an error. Reject it:
+		// it is not zero, and PostgreSQL cannot convert it to a float either.
+		if f == 0 && strings.ContainsAny(mantissa(string(v)), "123456789") {
 			return errors.New("number is out of range")
 		}
 	case map[string]any:
@@ -243,6 +249,14 @@ func validateStorable(value any) error {
 		}
 	}
 	return nil
+}
+
+// mantissa returns the part of a JSON number literal before any exponent.
+func mantissa(literal string) string {
+	if i := strings.IndexAny(literal, "eE"); i >= 0 {
+		return literal[:i]
+	}
+	return literal
 }
 
 func requiredID(raw map[string]any, key string) (string, error) {

@@ -165,7 +165,7 @@ func (s *Store) AppendBatch(ctx context.Context, events []Event) (BatchResult, e
 			RETURNING id, device_id, seq, room_id, type, ts, payload, received_at
 		), new_alarms AS (
 			INSERT INTO alarms (device_id, room_id, ts, confidence, seq, received_at)
-			SELECT device_id, room_id, ts, (payload->>'confidence')::numeric, seq, received_at
+			SELECT device_id, room_id, ts, (payload->>'confidence')::float8, seq, received_at
 			FROM inserted
 			WHERE type = 'fall_warn'
 			ORDER BY id
@@ -314,7 +314,7 @@ type Alarm struct {
 	ReceivedAt time.Time
 }
 
-const alarmColumns = `id, device_id, room_id, ts, confidence::float8, seq, received_at`
+const alarmColumns = `id, device_id, room_id, ts, confidence, seq, received_at`
 
 func scanAlarm(row pgx.CollectableRow) (Alarm, error) {
 	var a Alarm

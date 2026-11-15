@@ -10,7 +10,7 @@ CREATE TABLE alarms (
     device_id   text        NOT NULL,
     room_id     text        NOT NULL,
     ts          timestamptz NOT NULL,
-    confidence  numeric     NOT NULL,
+    confidence  double precision NOT NULL,
     seq         bigint      NOT NULL,
     received_at timestamptz NOT NULL,
     UNIQUE (device_id, room_id, ts, confidence)
