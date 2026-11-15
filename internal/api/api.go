@@ -38,6 +38,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /events", s.postEvent)
 	mux.HandleFunc("GET /devices/{device_id}/health", s.getDeviceHealth)
 	mux.HandleFunc("GET /rooms/{room_id}/occupancy", s.getRoomOccupancy)
+	mux.HandleFunc("GET /alarms", s.getAlarms)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	})

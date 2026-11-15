@@ -1,0 +1,128 @@
+package api
+
+import (
+	"errors"
+	"log/slog"
+	"net/http"
+	"strconv"
+	"time"
+
+	"github.com/junayd-elahi/teton-streaming/internal/store"
+)
+
+const (
+	maxFeedWait   = 30 * time.Second
+	feedPageLimit = 1000
+)
+
+// getAlarms serves two views of the same alarms:
+//
+//	GET /alarms?since=<ts>                  snapshot ordered by event time
+//	GET /alarms?after_id=<cursor>&wait=<s>  resumable feed in commit order
+func (s *Server) getAlarms(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Has("after_id") {
+		s.getAlarmFeed(w, r)
+		return
+	}
+	s.getAlarmSnapshot(w, r)
+}
+
+// getAlarmSnapshot returns every alarm whose event time is at or after since.
+// since is unix seconds (0 means everything) or an ISO 8601 timestamp.
+func (s *Server) getAlarmSnapshot(w http.ResponseWriter, r *http.Request) {
+	since, err := parseSince(r.URL.Query().Get("since"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	alarms, err := s.store.AlarmsSince(r.Context(), since)
+	if err != nil {
+		slog.Error("alarm snapshot query failed", "err", err)
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable, retry"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"alarms": alarmObjects(alarms)})
+}
+
+// getAlarmFeed returns alarms committed after the cursor. With wait, an empty
+// result is held open until a new alarm commits or the wait runs out. The
+// consumer stores next_cursor and passes it as after_id next time; that works
+// across disconnects and service restarts because the cursor is the alarm's
+// durable id.
+func (s *Server) getAlarmFeed(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	cursor, err := strconv.ParseInt(query.Get("after_id"), 10, 64)
+	if err != nil || cursor < 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "after_id must be a non-negative integer"})
+		return
+	}
+	var wait time.Duration
+	if query.Has("wait") {
+		seconds, err := strconv.ParseFloat(query.Get("wait"), 64)
+		if err != nil || seconds < 0 || seconds > maxFeedWait.Seconds() {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "wait must be between 0 and 30 seconds"})
+			return
+		}
+		wait = time.Duration(seconds * float64(time.Second))
+	}
+
+	deadline := time.NewTimer(wait)
+	defer deadline.Stop()
+	for {
+		// Take the signal before querying so a commit in between still wakes us.
+		newAlarms := s.writer.NewAlarms()
+		alarms, err := s.store.AlarmsAfter(r.Context(), cursor, feedPageLimit)
+		if err != nil {
+			slog.Error("alarm feed query failed", "err", err)
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "storage unavailable, retry"})
+			return
+		}
+		if len(alarms) > 0 {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"alarms":      alarmObjects(alarms),
+				"next_cursor": alarms[len(alarms)-1].ID,
+			})
+			return
+		}
+		select {
+		case <-newAlarms:
+		case <-deadline.C:
+			writeJSON(w, http.StatusOK, map[string]any{"alarms": []any{}, "next_cursor": cursor})
+			return
+		case <-r.Context().Done():
+			return
+		}
+	}
+}
+
+func parseSince(raw string) (time.Time, error) {
+	if raw == "" {
+		return time.Unix(0, 0), nil
+	}
+	if seconds, err := strconv.ParseFloat(raw, 64); err == nil {
+		return time.Unix(0, int64(seconds*float64(time.Second))), nil
+	}
+	if ts, err := time.Parse(time.RFC3339Nano, raw); err == nil {
+		return ts, nil
+	}
+	return time.Time{}, errors.New("since must be unix seconds or an ISO 8601 timestamp")
+}
+
+// alarmObjects keeps the fields of the original fall_warn event and adds the
+// feed cursor and receipt time.
+func alarmObjects(alarms []store.Alarm) []map[string]any {
+	objects := make([]map[string]any, len(alarms))
+	for i, a := range alarms {
+		objects[i] = map[string]any{
+			"alarm_id":    a.ID,
+			"device_id":   a.DeviceID,
+			"room_id":     a.RoomID,
+			"type":        "fall_warn",
+			"ts":          a.TS.UTC().Format(timestampLayout),
+			"seq":         a.Seq,
+			"confidence":  a.Confidence,
+			"received_ts": a.ReceivedAt.UTC().Format(timestampLayout),
+		}
+	}
+	return objects
+}
