@@ -188,6 +188,9 @@ func TestValidation(t *testing.T) {
 	event := func(ts string) string {
 		return `{"device_id":"dev_0002","room_id":"room_001","type":"heartbeat","ts":"` + ts + `","seq":1}`
 	}
+	typed := func(typ, extra string) string {
+		return `{"device_id":"dev_0004","room_id":"room_001","type":"` + typ + `","ts":"2026-11-15T12:00:00.000Z","seq":1` + extra + `}`
+	}
 	cases := []struct {
 		name string
 		body string
@@ -200,6 +203,13 @@ func TestValidation(t *testing.T) {
 		{"missing seq", `{"device_id":"dev_0003","room_id":"room_001","type":"heartbeat","ts":"2026-11-15T12:00:00.000Z"}`, http.StatusBadRequest},
 		{"unknown type", `{"device_id":"dev_0003","room_id":"room_001","type":"nope","ts":"2026-11-15T12:00:00.000Z","seq":1}`, http.StatusBadRequest},
 		{"bad ts", `{"device_id":"dev_0003","room_id":"room_001","type":"heartbeat","ts":"yesterday","seq":1}`, http.StatusBadRequest},
+		{"presence without in_room", typed("presence", ``), http.StatusBadRequest},
+		{"presence with non-boolean in_room", typed("presence", `,"in_room":"yes"`), http.StatusBadRequest},
+		{"motion above 1", typed("motion", `,"magnitude":1.01`), http.StatusBadRequest},
+		{"motion without magnitude", typed("motion", ``), http.StatusBadRequest},
+		{"fall_warn below 0", typed("fall_warn", `,"confidence":-0.1`), http.StatusBadRequest},
+		{"sleep_state with unknown value", typed("sleep_state", `,"state":"dozing"`), http.StatusBadRequest},
+		{"net_status with text rssi", typed("net_status", `,"rssi":"weak"`), http.StatusBadRequest},
 	}
 	for _, c := range cases {
 		if got := post(t, svc, c.body); got != c.want {
@@ -208,6 +218,31 @@ func TestValidation(t *testing.T) {
 	}
 	if got := count(t, svc); got != 1 {
 		t.Fatalf("%d events, want 1 (only the accepted case)", got)
+	}
+}
+
+func TestEveryEventTypeIsAcceptedWithItsField(t *testing.T) {
+	svc := startService(t)
+	defer svc.stop()
+	reset(t, svc)
+	extras := map[string]string{
+		"heartbeat":   ``,
+		"presence":    `,"in_room":false`,
+		"motion":      `,"magnitude":0.81`,
+		"sleep_state": `,"state":"asleep"`,
+		"fall_warn":   `,"confidence":0.92`,
+		"net_status":  `,"rssi":-68`,
+	}
+	seq := 0
+	for typ, extra := range extras {
+		seq++
+		body := fmt.Sprintf(`{"device_id":"dev_0005","room_id":"room_001","type":"%s","ts":"2026-11-15T12:00:00.000Z","seq":%d%s}`, typ, seq, extra)
+		if got := post(t, svc, body); got != http.StatusOK {
+			t.Errorf("%s: status %d, want 200", typ, got)
+		}
+	}
+	if got := count(t, svc); got != int64(len(extras)) {
+		t.Fatalf("%d events, want %d", got, len(extras))
 	}
 }
 

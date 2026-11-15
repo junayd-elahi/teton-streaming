@@ -68,7 +68,8 @@ func (s *Server) postEvent(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// parseEvent validates the envelope and builds the canonical payload.
+// parseEvent validates the envelope and type-specific fields and builds the
+// canonical payload.
 // Canonical form is the JSON object re-encoded with sorted keys and numbers
 // kept exactly as sent.
 func parseEvent(body io.Reader, received time.Time) (store.Event, error) {
@@ -117,6 +118,10 @@ func parseEvent(body io.Reader, received time.Time) (store.Event, error) {
 		return store.Event{}, errors.New("seq must be a non-negative integer")
 	}
 
+	if err := validateTypeFields(typ, raw); err != nil {
+		return store.Event{}, err
+	}
+
 	var canonical bytes.Buffer
 	enc := json.NewEncoder(&canonical)
 	enc.SetEscapeHTML(false)
@@ -136,6 +141,53 @@ func parseEvent(body io.Reader, received time.Time) (store.Event, error) {
 		PayloadHash: hash[:],
 		ReceivedAt:  received.UTC(),
 	}, nil
+}
+
+// validateTypeFields checks the one extra field each event type carries.
+func validateTypeFields(typ string, raw map[string]any) error {
+	switch typ {
+	case "presence":
+		if _, ok := raw["in_room"].(bool); !ok {
+			return errors.New("in_room is required and must be a boolean")
+		}
+	case "motion":
+		return requiredUnitInterval(raw, "magnitude")
+	case "fall_warn":
+		return requiredUnitInterval(raw, "confidence")
+	case "sleep_state":
+		state, _ := raw["state"].(string)
+		if state != "asleep" && state != "awake" && state != "unknown" {
+			return errors.New("state is required and must be asleep, awake or unknown")
+		}
+	case "net_status":
+		if _, err := requiredNumber(raw, "rssi"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func requiredNumber(raw map[string]any, key string) (float64, error) {
+	num, ok := raw[key].(json.Number)
+	if !ok {
+		return 0, fmt.Errorf("%s is required and must be a number", key)
+	}
+	v, err := num.Float64()
+	if err != nil {
+		return 0, fmt.Errorf("%s is not a valid number", key)
+	}
+	return v, nil
+}
+
+func requiredUnitInterval(raw map[string]any, key string) error {
+	v, err := requiredNumber(raw, key)
+	if err != nil {
+		return err
+	}
+	if v < 0 || v > 1 {
+		return fmt.Errorf("%s must be between 0 and 1", key)
+	}
+	return nil
 }
 
 func requiredString(raw map[string]any, key string) (string, error) {
