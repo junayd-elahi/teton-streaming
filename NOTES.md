@@ -87,14 +87,31 @@ The service was attacked with hostile input and reviewed against the brief. Defe
 
 Rough throughput measured by the independent tester on a 2 vCPU machine, with server, database and load tool sharing it: about 14,000 events/s at 1,000 concurrent senders, alarm delivery p95 130 ms, no refusals. That machine cannot say whether 50,000/s is reachable.
 
-Open items carried into the next phases:
+## Phase 5: priority, clock skew, overload and observability (done 15 Nov 2026)
 
-- Falls share one queue with every other event type, so they get no priority under overload.
-- Events dated ahead of the server clock are hidden until the clock reaches them. With the schema's normal clock skew of up to 30 s, a healthy device whose clock runs behind tops out at 0.9 availability, and one running ahead shows state up to 30 s late.
-- `since` on the snapshot filters by event time, so a poller using its last poll time misses late falls. The cursor feed does not have this problem.
-- The journal grows without bound. Reads need about one hour of it.
-- The generator restarts sequence numbers on every run. Several runs against one database reuse identities with new content and are refused as conflicts; use a fresh database per run.
-- Single instance only: the alarm wake-up signal and commit ordering are in-process.
+- **Fall priority.** Fall warnings have their own queue. Every batch takes all waiting falls first and then fills up with other events, so a fall waits for at most the batch already being committed. A full normal queue cannot cause a fall to be refused.
+- **Stalled database.** A batch that takes longer than `INGEST_COMMIT_TIMEOUT_MS` fails with a retryable 503 and the writer moves on, instead of blocking every sender behind it.
+- **Clock skew in health.** The schema allows device clocks to be 30 s or more off. Health is now measured on the device's own clock: the offset is the latest heartbeat's timestamp minus the time it was received, and the 300 s window ends at server time plus that offset. A healthy device scores 1.0 whether its clock is right, behind or ahead. A device that stops keeps its last offset, so its availability falls as real time passes. The response includes `clock_offset_seconds`.
+- **Clock skew in occupancy.** `in_room` follows the latest presence event even when it is dated ahead of the server clock ("latest presence event wins"). Such an event adds no occupied time until the server clock reaches its timestamp. Occupancy windows are not corrected per device; with 30 s of skew a transition can be placed up to 30 s off.
+- **Identity.** An event is identified by `(device_id, seq, ts)`. A device or generator that restarts its sequence numbers produces new events, not conflicts. A true retry carries the same timestamp, so retries are still recognised. Same identity with different content is still a 409.
+- **Alarm snapshot.** `since` filters by when the service received the fall, so a poller passing its last poll time also gets falls that arrived late. Results stay ordered by event time.
+- **Observability.** `GET /metrics` serves Prometheus text: events by outcome and by type, queue depth for both queues, batch size, commit time, queue wait, request time, alarms created, time from receiving a fall to its alarm being committed, batches split over refused data, waiting feed consumers, reads by endpoint and read errors. `GET /readyz` checks that the database answers; `GET /healthz` only says the process is up.
+
+Verified:
+
+- 12 heartbeats queued, then 2 falls, batches of 5: both falls are in the first batch.
+- Normal queue full: a heartbeat is refused as overloaded, a fall sent at the same moment is accepted.
+- Stalled database: each submit fails after about the commit timeout and the writer keeps serving.
+- A device sending once a second for 5 minutes scores 1.0 with its clock exact, 30 s behind and 30 s ahead, with the offset reported as 0, -30 and +30.
+- A device 30 s behind that stopped 2 minutes ago scores 0.6.
+- Same device and sequence number with a new timestamp: accepted as a new event.
+- A fall that happened before the poller's last poll but arrived after it is returned.
+
+Chosen limits:
+
+- A single heartbeat with a wildly wrong timestamp (up to the one hour allowed) moves that device's estimated clock until a later heartbeat replaces it.
+- Single instance only: the alarm wake-up signal and the commit ordering live in the process.
+- The journal grows without bound. Reads need about an hour of it; time-based partitions with a drop job are the intended fix.
 
 ## Run
 
@@ -107,4 +124,4 @@ go test -race -count=1 -p 1 ./...
 
 ## Deferred
 
-Readiness endpoint, metrics, overload behaviour, load measurement.
+Load measurement, journal retention.

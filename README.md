@@ -18,21 +18,25 @@ Work in progress.
 | Room occupancy over 1m, 5m, 1h (`GET /rooms/{id}/occupancy`) | Done |
 | Deduplicated fall alarms (`GET /alarms?since=`) | Done |
 | Resumable long-poll alarm feed (`GET /alarms?after_id=&wait=`) | Done |
-| Crash, overload and load measurements | Not started |
+| Fall warnings prioritised under load | Done |
+| Clock-skew correction for device health | Done |
+| Metrics (`GET /metrics`) and readiness (`GET /readyz`) | Done |
+| Load measurements | In progress |
 
 ## How ingestion works
 
 1. `POST /events` validates the envelope, the type-specific field and the timestamp. An event dated more than one hour ahead is rejected.
 2. Valid events go into a bounded queue. One writer takes whatever is waiting, up to a batch limit, and commits it as one transaction.
 3. The request is answered only after its batch commits, so a `200` means the event is on disk.
-4. `(device_id, seq)` identifies an event. Sending the same event again returns `200` with `"duplicate": true` and changes nothing. Reusing the identity with different content returns `409`.
+4. `(device_id, seq, ts)` identifies an event. Sending the same event again returns `200` with `"duplicate": true` and changes nothing. Reusing the identity with different content returns `409`.
 5. If the queue stays full, the request gets `503` with `Retry-After`. Retrying is always safe.
+6. Fall warnings have their own queue and are committed ahead of everything else, so a burst of heartbeats cannot delay or crowd out an alarm.
 
 ## How the reads work
 
 Health and occupancy are computed at read time from the journal, by the device's own event time, so a late or replayed event corrects the past without any extra step.
 
-- **Health:** the share of the last 300 one-second slots that contain a heartbeat.
+- **Health:** the share of the last 300 one-second slots that contain a heartbeat, measured on the device's own clock so that clock drift does not make a healthy device look unhealthy.
 - **Occupancy:** occupied time integrated from presence transitions and clipped to the window. Time before a room's first known state is reported as `unknown_seconds`, not counted as empty.
 
 ```bash
@@ -44,8 +48,14 @@ curl "localhost:8080/rooms/room_001/occupancy?window=5m"
 
 A sensor can report one fall several times. Reports with the same device, room, timestamp and confidence become one alarm, created in the same transaction as the event, so an acknowledged fall always has its alarm.
 
-- `GET /alarms?since=0` returns all alarms ordered by event time.
+- `GET /alarms?since=0` returns all alarms ordered by event time. `since` filters by when the fall was received, so late falls are not missed.
 - `GET /alarms?after_id=<cursor>&wait=10` is the live feed. It answers as soon as a new alarm commits, or with an empty list after the wait. Pass the returned `next_cursor` as `after_id` next time. The cursor survives disconnects and restarts, and a fall that arrives late is still delivered.
+
+## Operating it
+
+- `GET /healthz`: the process is up.
+- `GET /readyz`: the database answers.
+- `GET /metrics`: Prometheus text. Useful first looks are `teton_ingest_queue_depth`, `teton_events_received_total` by outcome, and `teton_alarm_visible_latency_seconds`.
 
 ## Stack
 
@@ -89,6 +99,7 @@ python3 event_generator/generate.py --mode adversarial --target http://localhost
 | `internal/api/` | HTTP handlers and validation |
 | `internal/ingest/` | Bounded queue and batching writer |
 | `internal/aggregation/` | Pure window calculations |
+| `internal/metrics/` | Metric types and Prometheus text output |
 | `internal/store/` | PostgreSQL journal and migrations runner |
 | `migrations/` | Versioned schema |
 | `tests/integration/` | Restart, replay, concurrency, conflict, fixed-clock read and alarm feed tests |
