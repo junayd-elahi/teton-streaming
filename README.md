@@ -1,6 +1,6 @@
 # Teton streaming backend
 
-A streaming backend for room-sensor events: it ingests device messages, journals them durably in PostgreSQL, and is being built up to serve device health, room occupancy and deduplicated fall alarms.
+A streaming backend for room-sensor events: it ingests device messages, journals them durably in PostgreSQL, and serves device health and room occupancy from them. Deduplicated fall alarms are next.
 
 This is my solution to [Teton's real-time streaming backend challenge](https://github.com/Teton-ai/careers-challenge-streaming-backend). The problem statement, event schema, event generator and evaluator all live in their repository and are not copied here.
 
@@ -14,7 +14,8 @@ Work in progress.
 | Idempotent retries and conflict detection | Done |
 | Validation of all six event types | Done |
 | Bounded queue with one batching writer | Done |
-| Device health and room occupancy | Not started |
+| Device health over 5 minutes (`GET /devices/{id}/health`) | Done |
+| Room occupancy over 1m, 5m, 1h (`GET /rooms/{id}/occupancy`) | Done |
 | Fall alarms and resumable alarm feed | Not started |
 | Crash, overload and load measurements | Not started |
 
@@ -25,6 +26,18 @@ Work in progress.
 3. The request is answered only after its batch commits, so a `200` means the event is on disk.
 4. `(device_id, seq)` identifies an event. Sending the same event again returns `200` with `"duplicate": true` and changes nothing. Reusing the identity with different content returns `409`.
 5. If the queue stays full, the request gets `503` with `Retry-After`. Retrying is always safe.
+
+## How the reads work
+
+Health and occupancy are computed at read time from the journal, by the device's own event time, so a late or replayed event corrects the past without any extra step.
+
+- **Health:** the share of the last 300 one-second slots that contain a heartbeat.
+- **Occupancy:** occupied time integrated from presence transitions and clipped to the window. Time before a room's first known state is reported as `unknown_seconds`, not counted as empty.
+
+```bash
+curl localhost:8080/devices/dev_0001/health
+curl "localhost:8080/rooms/room_001/occupancy?window=5m"
+```
 
 ## Stack
 
@@ -67,7 +80,8 @@ python3 event_generator/generate.py --mode adversarial --target http://localhost
 | `cmd/server/` | Process entry point and configuration |
 | `internal/api/` | HTTP handlers and validation |
 | `internal/ingest/` | Bounded queue and batching writer |
+| `internal/aggregation/` | Pure window calculations |
 | `internal/store/` | PostgreSQL journal and migrations runner |
 | `migrations/` | Versioned schema |
-| `tests/integration/` | Restart, replay, concurrency and conflict tests |
+| `tests/integration/` | Restart, replay, concurrency, conflict and fixed-clock read tests |
 | `NOTES.md` | Design decisions and what has been verified |
