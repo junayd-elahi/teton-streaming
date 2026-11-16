@@ -4,7 +4,7 @@ This file records the current design and the evidence behind the reported behavi
 
 ## Current design
 
-- **Durable ingestion:** `POST /events` validates the envelope and type-specific values before enqueueing. Bounded ordinary lanes batch journal writes. A lane waits up to 5 ms to fill a batch only when requests are already queued, so a client sending one request at a time is answered without that wait. A dedicated fall lane protects warnings from ordinary queue saturation and never waits. The service replies successfully only after commit. Queue saturation returns `503` with `Retry-After`; storage failures return retryable `503`.
+- **Durable ingestion:** `POST /events` validates the envelope and type-specific values before enqueueing. Bounded ordinary lanes batch journal writes. A lane waits up to 5 ms to fill a batch only when requests are already queued, so a client sending one request at a time is answered without that wait. A dedicated fall lane protects warnings from ordinary queue saturation and never waits. The service replies successfully only after commit. A request waits up to `INGEST_ENQUEUE_TIMEOUT_MS` (4 seconds as configured) for queue space; after that, saturation returns `503` with `Retry-After`; storage failures return retryable `503`.
 - **Identity and retries:** `(device_id, seq, ts)` identifies an event. An identical retry is a duplicate; different content under the same identity is a conflict. Alarm creation is transactional with the event. An advisory transaction fence prevents an interrupted alarm commit from being overtaken by a later cursor.
 - **Reads:** Health and occupancy are computed from journal rows at read time and use event time. Late and replayed events therefore correct historical windows. Occupancy before the first known presence state is unknown, not empty.
 - **Alarms:** Timestamp-ordered snapshots support history; the live feed follows commit order and resumes with a durable cursor. Strict event-time ordering for arbitrarily late events is not compatible with prompt live delivery.
@@ -88,7 +88,7 @@ The server, PostgreSQL 16.2, and load process shared a Linux environment where G
 
 | Run | Verified result |
 |---|---|
-| 30-second closed-loop capacity | 1,755,375 accepted; 58,477/s; 23,162/23,162 acknowledged falls delivered; POST-to-feed p95 28.714 ms |
+| 30-second closed-loop capacity | 1,755,375 accepted; 58,477/s; 23,162/23,162 acknowledged falls delivered; POST-to-feed p50 9.624 ms, p95 28.714 ms |
 | Five-minute scenario, first 50K/s burst | 1,500,000 scheduled, sent, and accepted; all 19,826 acknowledged falls delivered |
 | Five-minute scenario, second 50K/s burst | 1,500,000 scheduled, sent, and accepted; all 19,746 acknowledged falls delivered |
 | Complete five-minute scenario | 4,200,000 events scheduled and sent; 4,199,967 fresh acceptances plus 33 duplicate acknowledgements; journal count 4,200,000; all 60,000 events buffered during offline periods replayed |
@@ -107,7 +107,7 @@ Older Windows port-proxy and shared-listener latency results are superseded by t
 
 ## Limits and next work
 
-Retention should use time-based partitions or bounded deletion, chosen after measuring their cost, with a cleanup policy that preserves sufficient history for window calculations. Define and test the retained-state boundary before deletion. Other explicit limits are the single-instance cursor/wakeup model, clock-skew estimates based on the newest eligible event-time heartbeat, and event-time versus live commit-order alarm semantics. No private evaluator score or certification is reported.
+Retention should use time-based partitions or bounded deletion, chosen after measuring their cost, with a cleanup policy that preserves sufficient history for window calculations. Define and test the retained-state boundary before deletion. Fall deduplication matches reports with the same device, room, timestamp and confidence, which is how the supplied generator repeats a fall; a repeat with a shifted timestamp would become a separate alarm, and merging those needs a physical-fall identifier from the device. Other explicit limits are the single-instance cursor/wakeup model, clock-skew estimates based on the newest eligible event-time heartbeat, and event-time versus live commit-order alarm semantics. No private evaluator score or certification is reported.
 
 ## Local commands
 

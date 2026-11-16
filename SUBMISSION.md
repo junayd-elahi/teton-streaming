@@ -10,19 +10,19 @@
 
 ## Stack and storage
 
-Go's `net/http` and `pgx` give one binary that handles many open requests cheaply. PostgreSQL 16 stores the journal and alarms transactionally, so an alarm commits with its event without a broker; success follows commit. HTTP/JSON matches the challenge generator and is easy to inspect.
+Go's `net/http` and `pgx` give one binary that handles many open requests cheaply. PostgreSQL 16 stores the journal and alarms transactionally, so an alarm commits with its event without a broker; success follows commit. HTTP/JSON matches the challenge generator.
 
 ## Ordering and late events
 
-Identity combines device, sequence, and event timestamp. Journal-based reads use event time, so replay corrects history. Falls deduplicate by device, room, timestamp and confidence, matching supplied jitter copies. Live alarms follow durable commit order; snapshots use event time.
+Identity combines device, sequence and event timestamp. Journal-based reads use event time, so replay corrects history. Falls deduplicate by device, room, timestamp and confidence, matching supplied jitter copies. Live alarms follow durable commit order; snapshots use event time.
 
 ## Backpressure
 
-Bounded ordinary lanes and a separate fall lane provide backpressure. A 10x burst is queued and delayed, not dropped. Saturation lasting four seconds returns `503` with `Retry-After`; identity checks make retries safe. Database contention can still delay falls.
+Bounded ordinary lanes and a separate fall lane provide backpressure. A 10x burst is queued and delayed, not dropped. Saturation lasting four seconds returns `503` with `Retry-After`; retries are safe. Database contention can still delay falls.
 
 ## Restart correctness
 
-Acknowledgements follow commit. Journal rows, alarms, and feed cursors survive restart. A database-level fence stops an interrupted fall commit surfacing behind a newer cursor.
+Acknowledgements follow commit. Journal rows, alarms and feed cursors survive restart. A database-level fence stops an interrupted fall commit surfacing behind a newer cursor.
 
 ## How to run it locally
 
@@ -37,7 +37,7 @@ From Teton's repository, run `python3 event_generator/generate.py --mode adversa
 
 ## Reported metrics
 
-- Sustained ingest rate: 58,477 events/s in a 30-second closed-loop run (Linux, 9 CPUs). One five-minute scenario accepted both 50,000/s bursts; two repeats sent 90% and 96% of the schedule, so that target is not reliably met. My 4-CPU Docker VM reached about 13,200/s. Teton's sequential generator reaches 886 events/s at 5,000 devices. Capacity figures predate the final batching change.
+- Sustained ingest rate: 58,477 events/s in a 30-second closed-loop run (Linux, 9 CPUs). One five-minute scenario accepted both 50,000/s bursts; two later runs sent 90% and 96% of the schedule, so that target is not reliably met. My 4-CPU Docker VM reached about 13,200/s in its burst. Under Teton's sequential generator the service accepts 886 events/s at 5,000 devices. The 9-CPU figures predate the final batching change.
 - Alarm feed latency p50 / p95: POST-to-feed 9.6 / 28.7 ms in that closed-loop run; 23,162 of 23,162 falls delivered.
 - Behavior under hard kill + restart: every acknowledged event and fall survived; under Teton's generator at 5,000 devices, 1,426 alarms matched 1,426 distinct falls. The database was not killed.
 - Aggregation correctness on replayed events: at low rate, an independent source-event verifier passed 66 occupancy and 28 health reads.
