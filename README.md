@@ -23,6 +23,12 @@ set -a && source .env && set +a
 go run ./cmd/server
 ```
 
+To run the whole stack in containers instead, with the service on `localhost:8080`:
+
+```bash
+docker compose -p teton-streaming up --build -d
+```
+
 The shell environment setup exports `DATABASE_URL` for the host process. Compose does not export container environment variables into your host shell. Keep the `.env` file local.
 
 The Compose server is exposed on localhost for trusted local evaluation. External deployment needs an authenticated, encrypted access boundary and a deployment-specific access policy.
@@ -38,12 +44,15 @@ set -a && source .env && set +a
 go test -race -count=1 -p 1 ./...
 ```
 
+The optional [independent correctness verifier](tools/verification/README.md) checks numerical health and occupancy results against source-event truth, then verifies recovery after a hard kill. It supplements the public evaluator.
+
 ## Run the official generator
 
 With the service running, clone the official harness alongside this checkout and run its smoke evaluator:
 
 ```bash
 git clone https://github.com/Teton-ai/careers-challenge-streaming-backend.git ../teton-challenge
+git -C ../teton-challenge checkout ade2e2cba2d6157f9d1bec7e4821ea54026473d3
 python3 ../teton-challenge/eval/check.py --target http://localhost:8080 --devices 50 --duration 30 smoke
 ```
 

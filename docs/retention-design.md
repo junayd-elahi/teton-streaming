@@ -9,4 +9,4 @@ Design only. No journal or alarm deletion is implemented.
 5. **Keep alarm contracts separate.** Preserve logical-fall deduplication keys, stable public identifiers and monotonically resumable cursors. Define a consumer retention horizon and an explicit expired-cursor response before deleting alarm history.
 6. **Compact atomically and verify equivalence.** Commit checkpoints and cleanup together in bounded work. Test concurrent late inserts, interrupted compaction and restart. Before/after results must match for health, all occupancy windows, retries/conflicts, late replay and feed resume.
 
-Choose partitioning or bounded deletion after measuring its migration, index and WAL costs. A simple timestamp-based purge is unsafe: an independent probe already demonstrated loss of occupied-room state and the last heartbeat.
+Choose partitioning or bounded deletion after measuring its migration, index and WAL costs. A simple timestamp-based purge is unsafe: deleting rows older than the read window loses the state of a room that has been quietly occupied since before the cutoff, and the last heartbeat of a device that has been offline since before it.

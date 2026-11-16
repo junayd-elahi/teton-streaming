@@ -326,11 +326,12 @@ type DeviceHealth struct {
 // DeviceHealth counts heartbeats over the device's own last five minutes.
 //
 // Device clocks drift, so "now" on the server is not "now" on the device. The
-// Offset is estimated from the most recently received heartbeat within 60
-// seconds of receipt. Larger differences are excluded from calibration so old
+// Offset is estimated from the newest event-time heartbeat within 60 seconds
+// of receipt. Larger differences are excluded from calibration so old
 // replay and large future outliers do not move the window. With no credible
 // sample the offset is zero. Delays within the bound remain indistinguishable
-// from clock skew. The window is
+// from clock skew. A backwards clock adjustment can leave the older estimate
+// in use until the device clock catches up. The window is
 // (deviceNow - 300s, deviceNow] in device time, and Slots is the number of
 // distinct one-second slots in it that hold a heartbeat, counted back from
 // deviceNow so there are exactly 300. A device that stopped sending keeps its
@@ -343,7 +344,7 @@ func (s *Store) DeviceHealth(ctx context.Context, deviceID string, at time.Time)
             SELECT ts - received_at AS clock_offset FROM event_log
             WHERE type = 'heartbeat' AND device_id = $1
               AND (ts - received_at) BETWEEN INTERVAL '-60 seconds' AND INTERVAL '60 seconds'
-            ORDER BY received_at DESC, ts DESC, id DESC LIMIT 1
+            ORDER BY ts DESC, received_at DESC, id DESC LIMIT 1
         ), device_clock AS (
             SELECT $2::timestamptz + COALESCE(
                 (SELECT clock_offset FROM clock_sample), INTERVAL '0 seconds') AS device_now

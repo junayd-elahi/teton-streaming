@@ -58,3 +58,21 @@ func TestNormalClockSkewWithTransportDelayRetainsCoverage(t *testing.T) {
 		}
 	}
 }
+
+func TestRecentReplayDoesNotReplaceNewerClockSample(t *testing.T) {
+	svc := startService(t)
+	defer svc.stop()
+	end := fixedNow.Add(5 * time.Minute)
+	device := "dev_recent_replay"
+	postLive(t, svc, device, 1, end.Add(-30*time.Second).Format(time.RFC3339Nano), 0)
+	postLive(t, svc, device, 2, end.Format(time.RFC3339Nano), 0)
+	// A buffered heartbeat arrives after a newer heartbeat, but still falls
+	// within the calibration eligibility interval.
+	svc.clock = end.Add(time.Millisecond)
+	mustPost(t, svc, heartbeatAt(device, 3, end.Add(-59*time.Second).Format(time.RFC3339Nano)))
+	var got health
+	getJSON(t, svc, "/devices/"+device+"/health", &got)
+	if got.ClockOffsetSeconds != 0 || got.Availability5m != 3.0/300 {
+		t.Fatalf("late replay replaced newer clock sample: %+v; want offset 0 and availability %v", got, 3.0/300)
+	}
+}

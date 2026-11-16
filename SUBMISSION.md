@@ -10,11 +10,11 @@
 
 ## Stack and storage
 
-Go (`net/http`, `pgx`) provides a direct single-process API. PostgreSQL 16 stores the event journal and alarms; success follows transaction commit. HTTP/JSON matches the challenge generator.
+Go (`net/http`, `pgx`) provides a direct single-process API. PostgreSQL 16 stores the event journal and alarms transactionally, so an alarm commits with its event without a broker; success follows commit. HTTP/JSON matches the challenge generator.
 
 ## Ordering and late events
 
-Identity combines device, sequence, and event timestamp. Journal-based health and occupancy use event time, so late and replayed events correct history. The live alarm feed follows durable commit order with a persistent cursor; snapshots are timestamp ordered.
+Identity combines device, sequence, and event timestamp. Journal-based reads use event time, so replay corrects history. Falls deduplicate by device, room, timestamp and confidence, matching supplied jitter copies. Timestamp-shifted repeats need a physical-fall identifier. Live alarms follow durable commit order; snapshots use event time. Strict live event-time order with arbitrary replay would require delayed delivery.
 
 ## Backpressure
 
@@ -37,11 +37,11 @@ From Teton’s repository, run `python3 event_generator/generate.py --mode adver
 
 ## Reported metrics
 
-- Sustained ingest rate: 58,477 accepted events/s in a 30-second closed-loop Linux run reporting 9 CPUs; the five-minute scenario accepted both scheduled 50,000/s cohorts (1.5 million each). My 4-CPU Docker VM reached about 13,200/s in its burst.
-- Alarm feed latency p50 / p95: Closed-loop POST-to-feed p50/p95 9.624/28.714 ms, with 23,162/23,162 falls delivered. Full-scenario burst schedule-to-feed p95: 100.119 ms and 25.902 ms.
-- Behavior under hard kill + restart: all 4.2 million scenario events, including offline replay, were acknowledged; journal counts persisted after API stop. The database was not killed.
-- Aggregation correctness on replayed events: fixed-clock tests cover late-event corrections; 61 live checks validated shape/ranges, not an independent aggregation oracle.
+- Sustained ingest rate: 58,477 accepted events/s in a 30-second closed-loop run (Linux, 9 CPUs). One five-minute scenario accepted both 50,000/s bursts; two repeats sent 90% and 96% of the schedule, so that target is not reliably met. My 4-CPU Docker VM reached about 13,200/s. Teton's sequential generator reaches 886 events/s at 5,000 devices.
+- Alarm feed latency p50 / p95: closed-loop POST-to-feed 9.6 / 28.7 ms; 23,162 of 23,162 falls delivered.
+- Behavior under hard kill + restart: every acknowledged event and fall survived; under Teton's generator at 5,000 devices, 1,426 alarms matched 1,426 distinct falls. The database was not killed.
+- Aggregation correctness on replayed events: an independent source-event verifier passed 66 occupancy and 28 health reads, including replay and clock skew.
 
 ## With another week
 
-I would implement time-based journal partitions and cleanup. First I would define and test the history needed to calculate occupancy and health, preserving room/device checkpoints, retry hashes and feed-cursor guarantees.
+I would implement journal retention, by time-based partitions or bounded deletion. First I would define and test the history needed to calculate occupancy and health, preserving room/device checkpoints, retry hashes and feed-cursor guarantees.
