@@ -1,0 +1,294 @@
+{
+  "date_utc": "2026-11-16",
+  "scope": "Full scheduled load with independent health/occupancy truth on separate controlled devices and room in the same database; does not oracle every generated load event. No private grader score.",
+  "source_base_commit": "0fce4e694485d686c109d2a4f66f2b1b2ce157a1",
+  "source_sha256": {
+    "cmd/server/main.go": "3419d6802e97e2e30294f6a97ff4dde131e136b3670c03c28e7849b07a33ff8a",
+    "internal/aggregation/occupancy.go": "1d4bba9eec20af73cabdd66d2ca1dd4e9da1dee106814ae3177ea1f056d205fb",
+    "internal/aggregation/occupancy_test.go": "c43c3c8a92cc0de5c744f47d0b28e0e2cc0d17b41547f1c759f3de0129071a02",
+    "internal/api/alarms.go": "414d2322d7fcff8dc95fa9c2212a5e786286a28f1d4f6fd8b38686a6300aed26",
+    "internal/api/api.go": "173b44575569b71b148e7a806419926fd3915dca19fd6dca0fcd2a5aff312a77",
+    "internal/api/bench_test.go": "bdec8be741d2cb2ce811a668f8c2ac93a2ac81f7ef12bb870b6535f7d6429763",
+    "internal/api/read.go": "267deb666282f1c3c7a8127920e50d45111d775f63746cc5f607da231f0a289f",
+    "internal/api/validation_test.go": "11a79a6038bcc4cbca0f5d3eb4c867df5bc543f704f86f4adfd7dfd936a59bb9",
+    "internal/ingest/commit_result_test.go": "691b05931a85dfda2b3ac24e63c45e729ba421e3b08c81bc323954b86ebd8d01",
+    "internal/ingest/writer.go": "a35749af306a767bc58590e7416eaa0d2f898faef9ce4617b1c7c37cb181d747",
+    "internal/ingest/writer_test.go": "f2408a122fc6cb072ea6dd9d337768922e5cc60d3074841fc48c4166f9ddf44e",
+    "internal/metrics/bench_test.go": "72e316087795b17bfa81c1c06196590e0b477849023b11a67ade709eacc488a4",
+    "internal/metrics/metrics.go": "f98720b93e8b88844ebc5fd6bf9531ac9f2de1d2587d42a643116f1a3a50d2d3",
+    "internal/metrics/metrics_test.go": "21500a50194af2bf2b31bd12660dd940ba5bb0549ee1223e205fe4db27c4322f",
+    "internal/metrics/registry.go": "3876e76a78d70654286b610118c98cd65ff41a4903e5ac41f15c7b1ba1a047a3",
+    "internal/metrics/service.go": "7ee97a90be6b3ec6ce08821b9868d3908a077ed0476c7037212766bec8cbaaa5",
+    "internal/store/append_bench_test.go": "615a8c6991d27393e655597de469a6fe5989040ff6b1e821181fad295a07e5d8",
+    "internal/store/append_test.go": "ae62553184683222438d21acfb17485b52cb5918c58fdb543d4b4130456c1cae",
+    "internal/store/store.go": "9947e4ac203f8356df93047a558648425ef19691081c2daff8cea1a1176e9ea5",
+    "migrations/001_event_log.sql": "313b461f061ada8c72fa20327efc6694c20ae053c608458dcf791ca453309c15",
+    "migrations/002_read_indexes.sql": "f5671647f8bee55a01e94a353ebc03bc2eeb5c5ea99ac05cf7b428d85621afa6",
+    "migrations/003_alarms.sql": "be858fd7b8b7bade6c31d838dfa594e6355fa40f90c4096b04c188d2609eebfd",
+    "migrations/004_identity_includes_ts.sql": "236811fb8af988a9aa1d2bcbd6eb2dccf74f3220e26deef1fd7821f3513bec4a",
+    "migrations/005_heartbeat_calibration.sql": "349f558a5fedba752edca55e0587445ba6a92e1a135e84cdda598a67c58887fb",
+    "migrations/006_persist_alarm_event_id.sql": "20ee10de6f8fdc4c7829e966b0ae39b15938fffc301b1a9fd717cbd0a7e88e48",
+    "migrations/007_heartbeat_event_time_calibration.sql": "049fe6bf90337f2d65f874221b534415b4c2c61c2a715a4a388fc81b59eb256b",
+    "migrations/embed.go": "05f5a57139c6beac6f4b2e0426b8de0e8ea396ec25e63508873552c2f0a3f6a4",
+    "tests/integration/alarm_upgrade_regression_test.go": "73af81032d755bc2387b2cbbd443aa564eb4e306ad2d829fbe9495c49dca24be",
+    "tests/integration/alarms_test.go": "e4b28e4eb926301a01b055c7e005a41726bb87fbee5728b2e8d8d11c0d3678ff",
+    "tests/integration/capacity_acceptance_test.go": "3bf3a00b4fee5c727785e34f54104b31ae93a3d8d5b39464035e1bd966786ab0",
+    "tests/integration/database_test.go": "61ee443fdc1cf3deaf00d8ad16d25ef29987810e1fb3f0b58e5338b5ff3c16b0",
+    "tests/integration/feed_recovery_regression_test.go": "2df4f4f2c394c1d608dca7e4a0915e3099048c7452725fd494bbc1b556d1d45c",
+    "tests/integration/health_regression_test.go": "3d67403cea9ed505cdff18ee520758446ef16055d7ec8eff6f892b2fdfc11065",
+    "tests/integration/hostile_test.go": "38dc10c96f5f05fc9b4e80c509f51e74c79b055ad1f132a31e2687608601a830",
+    "tests/integration/ingest_test.go": "2d0d1783b30fd7996682c82f4637641cbf79dc9bdbb9861f873d69c31e507a2f",
+    "tests/integration/journal_test.go": "747264e05946156f7708149c21934fb0145d3dfd537f6594cfb48a0d44d3a671",
+    "tests/integration/read_test.go": "5bf4e2256f0da03d4397409f05e461a8b50b1ed64e6ff55aa34d34698c4465c2",
+    "tests/integration/read_timeout_regression_test.go": "d6cc68d02ee12cb738ad16079931aabef2a0ca5dc2404fe86f377da3b244e57b",
+    "tests/integration/validation_regression_test.go": "f5affdf42b24c71f4153677d7206d4d597cedc5a256467a88ad81e1abe6831c4",
+    "tools/load/feed.go": "b9dda47d75d7d86d1a1de674cdf77808ce1ceea96091e3dd7e537d7d6db35095",
+    "tools/load/generation_test.go": "1d44cff5c5416ce7da1aec3f9757adf6dcf6787efe90a8de7092cd6350108e6e",
+    "tools/load/load_test.go": "df81729a4ea8532b5b1f471c1aea9070ab45778e9133e19d5b563638d32b1a28",
+    "tools/load/main.go": "bf18f5fa109c88c727c0ab0a21ba6077db990c687e0f188ac253d39b3b2c4327",
+    "tools/load/offline.go": "8a9c092eaa6507f255166f0b72ac39011257c0f9db457d0aa2a985347af53b55",
+    "tools/load/offline_test.go": "6454d9444097af0449deadc893226da5c36c2a95bec1fb5d7ccdb7e09de7319f",
+    "tools/load/phase_test.go": "1ae7c4524d71335c9b9c323d248637abd3264d969e5740614961ddc24144715c",
+    "tools/load/phases.go": "f53e89c033b926da070348e69d35b6b1065ccd6bc14459788a48dabce69725cf",
+    "tools/load/report.go": "64c1d4bb2641ba4bc4c79bd5e8dd2a844eb3abaa90f2f0f4150e87d0c13db923",
+    "tools/load/report_regression_test.go": "806110347d7f6b81f106469136ff3d2c58d603f6b9039bd282ec0cb947015659",
+    "tools/load/sender.go": "c4a5c72087406e969224db736bdbcfbd1965293a3a1846e774cdeafe16efb0fc",
+    "tools/load/sender_test.go": "4f1e9bfffd25ea414db52aa82fd73e1d927dccf3741bcd1491e3841a836a9727"
+  },
+  "attempts": [
+    {
+      "label": "first instrumented run",
+      "status": "failed_full_offer",
+      "duration_seconds": 300,
+      "configuration": {
+        "senders": 2000,
+        "offer_buffer": 16384,
+        "devices": 5000,
+        "duration_ns": 300000000000,
+        "rate": 5000,
+        "burst_rate": 50000,
+        "burst_start_ns": 30000000000,
+        "burst_duration_ns": 30000000000,
+        "second_burst_start_ns": 210000000000,
+        "offline_start_ns": 90000000000,
+        "offline_duration_ns": 60000000000,
+        "offline_percent": 20,
+        "offline_buffer_capacity_per_sender": 1000,
+        "retries": 10,
+        "strict_offer_window": false,
+        "require_full_offer": true,
+        "require_all_accepted": true,
+        "require_no_loss": true,
+        "min_accepted_rate": 0,
+        "max_request_p95_ms": 0,
+        "max_fall_p95_ms": 1000
+      },
+      "environment": {
+        "go_version": "go1.26.11",
+        "goarch": "amd64",
+        "gomaxprocs": 9,
+        "goos": "linux",
+        "num_cpu": 9
+      },
+      "postgresql": {
+        "server_version": "16.2",
+        "fsync": "on",
+        "synchronous_commit": "on",
+        "full_page_writes": "on"
+      },
+      "server_sha256": "149db4ed2fa9993bef0cd170153e747ccb2e94dd1854a7454a828dc7b6daad04",
+      "load_sha256": "6e83d3244746394bd3cfcdaf023b26a1b4e165880160fe98924a70b364eb44e9",
+      "offered": 4200000,
+      "sent": 3767249,
+      "not_sent": 432751,
+      "accepted": 3767249,
+      "duplicate": 0,
+      "falls_accepted": 49758,
+      "falls_delivered": 49758,
+      "falls_missing": 0,
+      "falls_duplicated": 0,
+      "fall_post_to_feed_latency": {
+        "count": 49758,
+        "p50_ms": 5.245,
+        "p95_ms": 28.337949999999925,
+        "p99_ms": 75.31715000000003,
+        "max_ms": 343.335
+      },
+      "offline_buffered": 60000,
+      "offline_replayed": 60000,
+      "offline_dropped": 0,
+      "offline_unflushed": 0,
+      "api_kill_offset_seconds": 180.265643705,
+      "api_ready_offset_seconds": 180.309873014,
+      "read_oracle": {
+        "passed": 565,
+        "failed": 0,
+        "occupancy_reads": 183,
+        "health_reads": 183,
+        "controlled_events": 199
+      },
+      "journal_after_api_stop": {
+        "all_events": 3767448,
+        "control_events": 199,
+        "alarms": 49758
+      },
+      "phases": [
+        {
+          "actual_starts_during_phase": 150000,
+          "actual_durable_acks_during_phase": 149974,
+          "name": "baseline",
+          "scheduled": 150000,
+          "sent": 150000,
+          "not_sent": 0,
+          "accepted": 150000,
+          "duplicate": 0,
+          "schedule_to_send_latency": {
+            "count": 150000,
+            "p50_ms": 0.388,
+            "p95_ms": 1.199,
+            "p99_ms": 5.09401000000001,
+            "max_ms": 40.691
+          },
+          "fall_post_to_feed_latency": {
+            "count": 1972,
+            "p50_ms": 1.48,
+            "p95_ms": 10.734949999999982,
+            "p99_ms": 35.68886999999991,
+            "max_ms": 103.858
+          },
+          "fall_schedule_to_feed_latency": {
+            "count": 1972,
+            "p50_ms": 1.9825,
+            "p95_ms": 12.139799999999989,
+            "p99_ms": 39.99131999999997,
+            "max_ms": 104.659
+          }
+        },
+        {
+          "actual_starts_during_phase": 1055367,
+          "actual_durable_acks_during_phase": 1053393,
+          "name": "burst_1",
+          "scheduled": 1500000,
+          "sent": 1067249,
+          "not_sent": 432751,
+          "accepted": 1067249,
+          "duplicate": 0,
+          "schedule_to_send_latency": {
+            "count": 1067249,
+            "p50_ms": 419.77,
+            "p95_ms": 699.3928,
+            "p99_ms": 879.62852,
+            "max_ms": 1026.587
+          },
+          "fall_post_to_feed_latency": {
+            "count": 14229,
+            "p50_ms": 11.464,
+            "p95_ms": 53.415,
+            "p99_ms": 125.94376,
+            "max_ms": 343.335
+          },
+          "fall_schedule_to_feed_latency": {
+            "count": 14229,
+            "p50_ms": 435.453,
+            "p95_ms": 712.8055999999999,
+            "p99_ms": 910.4793999999999,
+            "max_ms": 1053.133
+          }
+        },
+        {
+          "actual_starts_during_phase": 761880,
+          "actual_durable_acks_during_phase": 763856,
+          "name": "between_bursts",
+          "scheduled": 750000,
+          "sent": 750000,
+          "not_sent": 0,
+          "accepted": 750000,
+          "duplicate": 0,
+          "schedule_to_send_latency": {
+            "count": 750000,
+            "p50_ms": 0.453,
+            "p95_ms": 23620.542999999918,
+            "p99_ms": 52978.4871,
+            "max_ms": 60444.714
+          },
+          "fall_post_to_feed_latency": {
+            "count": 9896,
+            "p50_ms": 1.235,
+            "p95_ms": 12.325,
+            "p99_ms": 31.41964999999999,
+            "max_ms": 136.552
+          },
+          "fall_schedule_to_feed_latency": {
+            "count": 9896,
+            "p50_ms": 1.787,
+            "p95_ms": 25033.22025,
+            "p99_ms": 53288.39244999992,
+            "max_ms": 60120.712
+          }
+        },
+        {
+          "actual_starts_during_phase": 1499997,
+          "actual_durable_acks_during_phase": 1498560,
+          "name": "burst_2",
+          "scheduled": 1500000,
+          "sent": 1500000,
+          "not_sent": 0,
+          "accepted": 1500000,
+          "duplicate": 0,
+          "schedule_to_send_latency": {
+            "count": 1500000,
+            "p50_ms": 0.573,
+            "p95_ms": 39.108,
+            "p99_ms": 57.82001000000001,
+            "max_ms": 107.889
+          },
+          "fall_post_to_feed_latency": {
+            "count": 19654,
+            "p50_ms": 6.459,
+            "p95_ms": 23.154749999999993,
+            "p99_ms": 35.054370000000084,
+            "max_ms": 70.91
+          },
+          "fall_schedule_to_feed_latency": {
+            "count": 19654,
+            "p50_ms": 8.164,
+            "p95_ms": 53.399049999999995,
+            "p99_ms": 75.29735000000001,
+            "max_ms": 110.928
+          }
+        },
+        {
+          "actual_starts_during_phase": 300004,
+          "actual_durable_acks_during_phase": 301452,
+          "name": "post_burst",
+          "scheduled": 300000,
+          "sent": 300000,
+          "not_sent": 0,
+          "accepted": 300000,
+          "duplicate": 0,
+          "schedule_to_send_latency": {
+            "count": 300000,
+            "p50_ms": 0.384,
+            "p95_ms": 1.051,
+            "p99_ms": 1.646,
+            "max_ms": 16.729
+          },
+          "fall_post_to_feed_latency": {
+            "count": 4007,
+            "p50_ms": 1.258,
+            "p95_ms": 3.3423999999999996,
+            "p99_ms": 6.933760000000015,
+            "max_ms": 106.208
+          },
+          "fall_schedule_to_feed_latency": {
+            "count": 4007,
+            "p50_ms": 1.761,
+            "p95_ms": 3.8674999999999993,
+            "p99_ms": 8.090140000000002,
+            "max_ms": 107.087
+          }
+        }
+      ]
+    }
+  ]
+}

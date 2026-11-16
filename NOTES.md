@@ -32,6 +32,14 @@ There were no HTTP failures. A separate 30-second API-kill/restart probe acknowl
 
 These are functional checks, not capacity proof. [The verification record](docs/verification/public-evaluator.json) includes source hashes, the official harness revision, counts, isolation and scope.
 
+### Independent source-event verification
+
+A separate HTTP verifier calculates occupancy by intersecting source presence intervals with each window and health by counting original heartbeat second slots. It does not call the service aggregation code or derive expectations from stored rows. Request-time bounds account for real clock progression. It checks all three occupancy windows, predecessor/unknown state, historical replay, heartbeat cutoff boundaries, +/-30-second clocks, retries, 5,001 actual device identities, alarm identities and cursor resume after SIGKILL.
+
+This check found a recent-replay defect missed by earlier tests: a 59-second-old heartbeat arriving after a current heartbeat replaced the clock estimate, excluding newer heartbeat slots. The query now chooses the newest eligible event-time sample; a matching index avoids a lifetime-history sort. The frozen-clock regression failed before the fix and passed afterward. All independent checks then passed: 66 occupancy reads, 28 health reads, four alarm snapshots, six feed/restart/journal checks and four retry assertions, alongside 5,580 ingestion acknowledgements for 5,576 distinct source events. These are not 5,688 distinct aggregation scenarios.
+
+The full race suite passes 106 top-level tests and 56 subtests. [The compact before/after evidence](docs/verification/aggregation-oracle.json) records scope, source hashes and interpretation limits; [the reusable verifier](tools/verification/README.md) documents how to reproduce the low-rate check. Short delivery delay is still indistinguishable from clock skew, and a backwards device-clock jump can retain the prior estimate until it catches up.
+
 ### Linux capacity and scenario runs
 
 The server, PostgreSQL 16.2, and load process shared a Linux environment where Go reported 9 CPUs. Durability settings stayed enabled. This is not directly comparable with my 4-CPU Docker VM.
@@ -57,7 +65,7 @@ Older Windows port-proxy and shared-listener latency results are superseded by t
 
 ## Limits and next work
 
-Retention should use time-based partitions and a cleanup policy that preserves sufficient history for window calculations. Define and test the retained-state boundary before deletion. Other explicit limits are the single-instance cursor/wakeup model, clock-skew estimates based on recent received heartbeats, and event-time versus live commit-order alarm semantics. No private evaluator score or certification is reported.
+Retention should use time-based partitions and a cleanup policy that preserves sufficient history for window calculations. Define and test the retained-state boundary before deletion. Other explicit limits are the single-instance cursor/wakeup model, clock-skew estimates based on the newest eligible event-time heartbeat, and event-time versus live commit-order alarm semantics. No private evaluator score or certification is reported.
 
 ## Local commands
 

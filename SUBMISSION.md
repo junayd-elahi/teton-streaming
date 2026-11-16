@@ -14,7 +14,7 @@ Go (`net/http`, `pgx`) provides a direct single-process API. PostgreSQL 16 store
 
 ## Ordering and late events
 
-Identity combines device, sequence, and event timestamp. Journal-based health and occupancy use event time, so late and replayed events correct history. The live alarm feed follows durable commit order with a persistent cursor; snapshots are timestamp ordered.
+Identity combines device, sequence, and event timestamp. Journal-based reads use event time, so replay corrects history. Falls deduplicate by device, room, timestamp and confidence, matching supplied jitter copies. Timestamp-shifted repeats need a physical-fall identifier. Live alarms follow durable commit order; snapshots use event time. Strict live event-time order with arbitrary replay would require delayed delivery.
 
 ## Backpressure
 
