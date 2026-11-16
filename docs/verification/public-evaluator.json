@@ -1,0 +1,134 @@
+{
+  "date_utc": "2026-11-16",
+  "server_source_commit": "11b1fa48e83fdce8ac2ac98cb59b384715c1ce0b",
+  "environment": "Linux, PostgreSQL 16.2; synthetic data; native Go server, not Docker",
+  "scope": "Public functional evaluation at 50 devices, not a 5,000-device capacity test or private grader result. Alarm counts checked independently of evaluator exit status.",
+  "official_harness": {
+    "repository": "https://github.com/Teton-ai/careers-challenge-streaming-backend",
+    "commit": "ade2e2cba2d6157f9d1bec7e4821ea54026473d3",
+    "source_sha256": {
+      "Makefile": "5d0d794bb56ceab2243d148a931d61ceed8c2a2249d457a3f3d715ed848ed8d8",
+      "README.md": "19d5823b075a691ceea583f14fa0dcb0fafc17f4243e2354f817ca943bb180af",
+      "SUBMISSION.md": "5313186f916c23d9a4709febdaa1304591aaab7cb68c092c1f3ce3b3a40f1ef0",
+      "baseline_stub_smoke.txt": "4e54458decab3e49b1ab625d4eaae493f4bb9a87ffdef7553f03647cadd71220",
+      "docs/event_schema.md": "5470c6b142c53c0094e766b5079fcdd2cec4da80d61c9fd322296259a728952f",
+      "eval/check.py": "40977abd58687858d87e25e8a4858cc0bdeeb7862291eed1b54c3803d2938f23",
+      "event_generator/generate.py": "e84e1793212dc0e876fa4b00b3bffd6660423ae686db105be98880f7c0aa59b1",
+      "example_solution/service.py": "ec3ff12640a64cc4de7bc33cd8ebd84035d61bf913e679903b90680b082fef51"
+    }
+  },
+  "mode_isolation": "Each mode used a fresh private database; alarm history was not reused.",
+  "modes": [
+    {
+      "mode": "smoke",
+      "duration_seconds": 30,
+      "devices": 50,
+      "events_sent_ok": 1460,
+      "http_failures": 0,
+      "distinct_falls": 15,
+      "alarms_returned": 15,
+      "evaluator_exit": 0
+    },
+    {
+      "mode": "baseline",
+      "duration_seconds": 60,
+      "devices": 50,
+      "events_sent_ok": 2986,
+      "http_failures": 0,
+      "distinct_falls": 38,
+      "alarms_returned": 38,
+      "evaluator_exit": 0
+    },
+    {
+      "mode": "offline",
+      "duration_seconds": 120,
+      "devices": 50,
+      "events_sent_ok": 5176,
+      "http_failures": 0,
+      "distinct_falls": 69,
+      "alarms_returned": 69,
+      "evaluator_exit": 0
+    },
+    {
+      "mode": "burst",
+      "duration_seconds": 180,
+      "devices": 50,
+      "events_sent_ok": 15895,
+      "http_failures": 0,
+      "distinct_falls": 202,
+      "alarms_returned": 202,
+      "evaluator_exit": 0
+    },
+    {
+      "mode": "adversarial",
+      "duration_seconds": 240,
+      "devices": 50,
+      "events_sent_ok": 18285,
+      "http_failures": 0,
+      "distinct_falls": 242,
+      "alarms_returned": 242,
+      "evaluator_exit": 0
+    }
+  ],
+  "api_kill_restart": {
+    "duration_seconds": 30,
+    "api_kill_offset_seconds": 18.057,
+    "api_restart_offset_seconds": 18.359,
+    "api_restart_count": {
+      "events": 3005,
+      "alarms": 30,
+      "fall_events": 30
+    },
+    "api_restart_durable_count": {
+      "events": 3017,
+      "alarms": 30,
+      "fall_events": 30
+    },
+    "after": {
+      "events": 5400,
+      "alarms": 67,
+      "fall_events": 67
+    },
+    "after_api_stop": {
+      "events": 5400,
+      "alarms": 67,
+      "fall_events": 67
+    },
+    "accepted": 5400,
+    "duplicate_acknowledged": 0,
+    "offered": 5400,
+    "sent": 5400,
+    "not_sent": 0,
+    "offline_buffered": 120,
+    "offline_replayed": 120,
+    "offline_dropped": 0,
+    "offline_unflushed": 0,
+    "falls_accepted": 67,
+    "alarms_delta": 67,
+    "read_samples": 7,
+    "read_errors": 0,
+    "read_check_scope": "HTTP shape/range/readability only; not an independent ground-truth oracle",
+    "validation_status": "met"
+  },
+  "overload_retry": {
+    "workers": 32,
+    "accepted_events": 32,
+    "rejected_non503": 0,
+    "http_503_attempts": 533,
+    "retry_after_seen": true,
+    "all_event_retries_eventually_acked": true,
+    "journal_rows": 32,
+    "duplicate_after_ack": {
+      "status": 200,
+      "response": {
+        "duplicate": true,
+        "ok": true
+      }
+    }
+  },
+  "limits": [
+    "API was killed, not PostgreSQL. Database power-loss and backup restoration were not tested.",
+    "Live read samples check shape and range, not an independent aggregation oracle.",
+    "The overload probe deliberately reduced writer and queue limits and delayed inserts; it is not a production traffic benchmark."
+  ]
+}
