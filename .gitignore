@@ -4,4 +4,3 @@
 /server
 /load-results*.json
 *.test
-__pycache__/
