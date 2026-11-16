@@ -30,7 +30,7 @@ type Config struct {
 	QueueSize         int           // ordinary events waiting, per writer
 	PriorityQueueSize int           // fall warnings waiting for their writer
 	BatchSize         int           // maximum events per transaction
-	Linger            time.Duration // how long an ordinary batch waits to fill; 0 = not at all
+	Linger            time.Duration // how long a batch of two or more waits to fill; a lone request never waits; 0 = never wait
 	EnqueueTimeout    time.Duration // how long a request waits for queue space
 	CommitTimeout     time.Duration // how long one batch may take before it fails
 }
@@ -147,8 +147,10 @@ func (w *Writer) Submit(ctx context.Context, e store.Event) (store.Outcome, erro
 	}
 }
 
-// Run starts one writer per lane and returns when ctx ends. Ordinary lanes
-// linger to fill their batches; the fall-warning lane never waits.
+// Run starts one writer per lane and returns when ctx ends. An ordinary lane
+// lingers to fill its batch only when more than one request is already
+// waiting, which shows that senders are concurrent; a lone request is
+// committed at once. The fall-warning lane never waits.
 func (w *Writer) Run(ctx context.Context) {
 	var wg sync.WaitGroup
 	start := func(lane <-chan request, linger time.Duration) {
@@ -166,13 +168,17 @@ func (w *Writer) Run(ctx context.Context) {
 }
 
 // runLane commits one lane's events until ctx ends. It waits for one event,
-// gathers more for up to linger or until the batch is full, and commits them
-// together.
+// gathers more (see gather) and commits them together.
 //
 // The linger exists because a commit has a fixed cost (one statement, one
 // disk flush) whatever the batch size. Without it a fast database is handed
 // many tiny batches and spends its time on that fixed cost; a few
-// milliseconds of waiting turns them into fewer, fuller ones.
+// milliseconds of waiting turns them into fewer, fuller ones. It applies only
+// when requests are already queued together, because a client that sends one
+// request and waits for the reply can never supply a second one, and would
+// otherwise pay the whole linger on every request. Under heavy load requests
+// pile up while a commit is running, so the next batch starts with more than
+// one and lingering still fills batches.
 func (w *Writer) runLane(ctx context.Context, lane <-chan request, linger time.Duration) {
 	batch := make([]request, 0, w.cfg.BatchSize)
 	for {
@@ -189,23 +195,28 @@ func (w *Writer) runLane(ctx context.Context, lane <-chan request, linger time.D
 	}
 }
 
-// gather adds requests to the batch until it is full or linger has passed,
-// then takes whatever else is already waiting.
+// gather completes a batch that holds its first request. It takes whatever is
+// already waiting. If that is still a single request it stops there: nobody
+// else is sending, so waiting would only delay it. If there are several and
+// the batch is not full, it waits up to linger for more (until the batch is
+// full or the timer fires) and then takes anything else already waiting. A
+// linger of 0 never waits.
 func (w *Writer) gather(batch []request, lane <-chan request, linger time.Duration) []request {
-	if linger > 0 {
-		timer := time.NewTimer(linger)
-		defer timer.Stop()
-		for len(batch) < w.cfg.BatchSize {
-			select {
-			case req := <-lane:
-				batch = append(batch, req)
-				continue
-			case <-timer.C:
-			}
-			break
+	batch = drain(batch, lane, w.cfg.BatchSize)
+	if len(batch) == 1 || len(batch) >= w.cfg.BatchSize || linger <= 0 {
+		return batch
+	}
+	timer := time.NewTimer(linger)
+	defer timer.Stop()
+	for len(batch) < w.cfg.BatchSize {
+		select {
+		case req := <-lane:
+			batch = append(batch, req)
+		case <-timer.C:
+			return drain(batch, lane, w.cfg.BatchSize)
 		}
 	}
-	return drain(batch, lane, w.cfg.BatchSize)
+	return batch
 }
 
 // drain appends requests already waiting in queue until the batch is full.

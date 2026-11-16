@@ -265,44 +265,98 @@ func TestStalledCommitFailsAfterTimeoutAndWriterKeepsRunning(t *testing.T) {
 	}
 }
 
-// Five events arrive 5 ms apart. With a 200 ms linger they are committed as
-// one batch; the fall warning sent with them is committed at once, alone.
-func TestOrdinaryBatchesLingerToFillButFallWarningsDoNot(t *testing.T) {
+// A client that sends one request and waits for the reply can never supply a
+// second event, so a lone ordinary event must not wait out the linger.
+func TestLoneOrdinaryEventIsCommittedWithoutLingering(t *testing.T) {
 	journal := &recordingJournal{}
-	w := NewWriter(journal, Config{Writers: 1, QueueSize: 20, PriorityQueueSize: 20, BatchSize: 50, Linger: 200 * time.Millisecond, EnqueueTimeout: time.Second, CommitTimeout: time.Second}, testMetrics())
+	w := NewWriter(journal, Config{Writers: 1, QueueSize: 20, PriorityQueueSize: 20, BatchSize: 50, Linger: 2 * time.Second, EnqueueTimeout: time.Second, CommitTimeout: time.Second}, testMetrics())
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go w.Run(ctx)
 
-	fallDone := make(chan time.Duration, 1)
-	go func() {
-		started := time.Now()
-		w.Submit(context.Background(), store.Event{Seq: 100, Type: "fall_warn"})
-		fallDone <- time.Since(started)
-	}()
-	var wg sync.WaitGroup
-	for seq := int64(1); seq <= 5; seq++ {
-		wg.Add(1)
+	started := time.Now()
+	if _, err := w.Submit(context.Background(), store.Event{Seq: 1, Type: "heartbeat"}); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	if took := time.Since(started); took > 500*time.Millisecond {
+		t.Errorf("lone event took %v, want it committed without waiting for the 2s linger", took)
+	}
+	journal.mu.Lock()
+	defer journal.mu.Unlock()
+	if len(journal.batches) != 1 || len(journal.batches[0]) != 1 {
+		t.Errorf("got batches %v, want one batch of one event", journal.batches)
+	}
+}
+
+// Two events are already waiting when the writer picks up the lane, which
+// shows concurrent senders, so it lingers. Two more arrive within the linger
+// and join the same batch, which then fills and is committed.
+func TestOrdinaryBatchLingersWhenSendersAreConcurrent(t *testing.T) {
+	journal := &recordingJournal{}
+	w := NewWriter(journal, Config{Writers: 1, QueueSize: 20, PriorityQueueSize: 20, BatchSize: 4, Linger: 2 * time.Second, EnqueueTimeout: time.Second, CommitTimeout: time.Second}, testMetrics())
+	first := submitAll(t, w, []store.Event{{Seq: 1, Type: "heartbeat"}, {Seq: 2, Type: "heartbeat"}})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go w.Run(ctx)
+
+	// The writer may already have taken the first two, so these cannot be
+	// counted in the queue; they are simply sent while it is lingering.
+	time.Sleep(20 * time.Millisecond)
+	var second sync.WaitGroup
+	for seq := int64(3); seq <= 4; seq++ {
+		second.Add(1)
 		go func() {
-			defer wg.Done()
-			w.Submit(context.Background(), store.Event{Seq: seq, Type: "heartbeat"})
+			defer second.Done()
+			if _, err := w.Submit(context.Background(), store.Event{Seq: seq, Type: "heartbeat"}); err != nil {
+				t.Errorf("submit seq %d: %v", seq, err)
+			}
 		}()
-		time.Sleep(5 * time.Millisecond)
 	}
-	wg.Wait()
-	if took := <-fallDone; took > 100*time.Millisecond {
-		t.Errorf("fall warning took %v, want it committed without lingering", took)
-	}
+	first.Wait()
+	second.Wait()
 
 	journal.mu.Lock()
 	defer journal.mu.Unlock()
-	var ordinary [][]store.Event
-	for _, batch := range journal.batches {
-		if batch[0].Type == "heartbeat" {
-			ordinary = append(ordinary, batch)
+	if len(journal.batches) != 1 {
+		t.Fatalf("got %d batches, want one batch of 4", len(journal.batches))
+	}
+	var seqs []int64
+	for _, e := range journal.batches[0] {
+		seqs = append(seqs, e.Seq)
+	}
+	slices.Sort(seqs)
+	if want := []int64{1, 2, 3, 4}; !slices.Equal(seqs, want) {
+		t.Errorf("batch holds seqs %v, want %v", seqs, want)
+	}
+}
+
+// An ordinary lane is lingering with two events. A fall warning has its own
+// lane and is committed at once, long before the linger ends.
+func TestFallWarningIsNotDelayedByLingeringOrdinaryLane(t *testing.T) {
+	journal := &recordingJournal{}
+	w := NewWriter(journal, Config{Writers: 1, QueueSize: 20, PriorityQueueSize: 20, BatchSize: 50, Linger: 2 * time.Second, EnqueueTimeout: time.Second, CommitTimeout: time.Second}, testMetrics())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ordinary := submitAll(t, w, []store.Event{{Seq: 1, Type: "heartbeat"}, {Seq: 2, Type: "heartbeat"}})
+	go w.Run(ctx)
+	for { // wait until the writer has taken both and is lingering
+		if normal, _ := w.QueueDepths(); normal == 0 {
+			break
 		}
+		time.Sleep(time.Millisecond)
 	}
-	if len(ordinary) != 1 || len(ordinary[0]) != 5 {
-		t.Fatalf("heartbeats were committed in %d batches, want one batch of 5", len(ordinary))
+
+	started := time.Now()
+	if _, err := w.Submit(context.Background(), store.Event{Seq: 100, Type: "fall_warn"}); err != nil {
+		t.Fatalf("fall warning: %v", err)
 	}
+	if took := time.Since(started); took > 500*time.Millisecond {
+		t.Errorf("fall warning took %v, want it committed without waiting for the 2s linger", took)
+	}
+	journal.mu.Lock()
+	if len(journal.batches) != 1 || len(journal.batches[0]) != 1 || journal.batches[0][0].Seq != 100 {
+		t.Errorf("got batches %v, want only the fall warning committed so far", journal.batches)
+	}
+	journal.mu.Unlock()
+	ordinary.Wait()
 }
