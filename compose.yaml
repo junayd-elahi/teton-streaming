@@ -32,6 +32,9 @@ services:
       # overload a request is held for queue space for up to 4 s before it is refused.
       INGEST_ENQUEUE_TIMEOUT_MS: "4000"
       INGEST_COMMIT_TIMEOUT_MS: "5000"
+      # Collect garbage less often: about 15% more events/s under concurrent load
+      # in exchange for about 155 MB of memory instead of 75 MB.
+      GOGC: "400"
     ports:
       - "127.0.0.1:8080:8080"
     depends_on:

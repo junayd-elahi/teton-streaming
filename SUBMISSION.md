@@ -37,7 +37,7 @@ From Teton's repository, run `python3 event_generator/generate.py --mode adversa
 
 ## Reported metrics
 
-- Sustained ingest rate: 58,477 events/s in a 30-second closed-loop run (Linux, 9 CPUs). One five-minute scenario accepted both 50,000/s bursts; two later runs sent 90% and 96% of the schedule, so that target is not reliably met. My 4-CPU Docker VM reached about 13,200/s in its burst. Under Teton's sequential generator the service accepts 886 events/s at 5,000 devices. The 9-CPU figures predate the final batching change.
+- Sustained ingest rate: 58,477 events/s in a 30-second closed-loop run (Linux, 9 CPUs). One five-minute scenario accepted both 50,000/s bursts; two later runs sent 90% and 96% of the schedule, losing nothing, so that target is not reliably met. My 4-CPU Docker VM reached about 13,200/s. Under Teton's sequential generator the service accepts 886 events/s at 5,000 devices. The 9-CPU figures predate the final batching change.
 - Alarm feed latency p50 / p95: POST-to-feed 9.6 / 28.7 ms in that closed-loop run; 23,162 of 23,162 falls delivered.
 - Behavior under hard kill + restart: every acknowledged event and fall survived; under Teton's generator at 5,000 devices, 1,426 alarms matched 1,426 distinct falls. The database was not killed.
 - Aggregation correctness on replayed events: at low rate, an independent source-event verifier passed 66 occupancy and 28 health reads.

@@ -76,9 +76,29 @@ A device that has never sent a heartbeat returns `last_heartbeat_ts: null` with 
 
 Two fresh five-minute runs of the health fix used a 5,000/s baseline, two 30-second 50,000/s bursts, 20% of devices offline for 60 seconds, and API SIGKILL/restart after three minutes. Both failed the full-offer gate: the first sent and acknowledged 3,767,249 of 4,200,000 scheduled events; an unchanged quiet repeat sent and acknowledged 4,049,045. The generator never sent 432,751 and 150,955 events respectively. These are not demonstrated server refusals, but neither run proves the full scheduled target was handled.
 
-Every acknowledged fall was delivered exactly once (49,758 and 53,508 respectively), all 60,000 offline events replayed in each run, and acknowledged journal counts persisted after the API stopped. Each run passed 183 occupancy and 183 health reads against independent input truth on controlled devices in the same loaded database. This does not validate every load-generator event against an aggregation oracle. [Both attempt records](docs/verification/rubric-load-attempts.json) retain the failed gate, phase counts, latency and source hashes. The cause of the offered-load shortfall has not been isolated; the burst-capacity requirement remains a submission risk.
+Every acknowledged fall was delivered exactly once (49,758 and 53,508 respectively), all 60,000 offline events replayed in each run, and acknowledged journal counts persisted after the API stopped. Each run passed 183 occupancy and 183 health reads against independent input truth on controlled devices in the same loaded database. This does not validate every load-generator event against an aggregation oracle. [Both attempt records](docs/verification/rubric-load-attempts.json) retain the failed gate, phase counts, latency and source hashes. The cause of the shortfall is analysed below; the burst-capacity target remains unproven at full scale.
 
 The older successful measurements below are historical evidence under their recorded conditions. They do not override these newer unmet gates.
+
+### Shortfall cause and final configuration
+
+The load tool counts a scheduled event as not sent only when every sender is still waiting for a reply and its offer buffer is full. With 2,000 senders, 50,000 events/s needs a mean reply time of 40 ms or less. In the first burst of the first failed run the senders completed about 35,600 events/s, a mean of about 56 ms per request, and the median wait for a free sender was 420 ms; the same build then sent the whole second burst. In the successful scenario the first burst was acknowledged at a 17 ms median. The unsent events therefore come from slower replies on a machine shared by the load tool, the service and PostgreSQL. They are not a scheduling fault and not refusals. The records cannot separate service time from the load tool competing for the same CPUs.
+
+A CPU profile of the service under closed-loop load (2-CPU Linux, 1,000 senders, everything on one machine) put about three quarters of its time in reading, parsing and answering individual HTTP requests and about 14% in memory allocation; PostgreSQL used a third as much CPU as the service. One change followed: Go's garbage-collection target is raised with `GOGC=400` in `compose.yaml` and `.env.example`.
+
+| GOGC | Accepted events/s, three 20-second runs | Service memory |
+|---|---|---:|
+| 100 (Go default) | 16,548, 16,739 and 17,880 | about 75 MB |
+| 400 | 19,319, 19,539 and 20,127 | about 155 MB |
+
+That is about 15% more on the same machine. Forcing PostgreSQL checkpoints inside a burst (`max_wal_size` of 256 MB against 8 GB) made no measurable difference there, so the database keeps its default settings. The 50,000/s schedule was not rerun on a larger machine with this setting, so that target remains unproven.
+
+Final checks used the source at commit `b1b9fdd` with this setting, on 2-CPU Linux with Go 1.26.11 and PostgreSQL 16.15, durability settings on:
+
+- `go test -race -count=1 -p 1 ./...` passed 108 top-level tests and 56 subtests.
+- Teton's evaluator in adversarial mode at 5,000 devices for 240 seconds: 217,800 events generated and accepted with no HTTP failures, and 2,780 alarms for 2,780 distinct falls.
+- The same run with the service hard-killed at 100 seconds and restarted one second later: 217,730 of 217,817 events accepted and 87 failed during the outage, which the generator does not retry. The journal held 217,731 rows, one of them committed before its reply was lost. 2,855 alarms matched 2,855 distinct journaled falls; the generator counted 2,860, and the other five never reached the service.
+- Feed order in that run, with device clocks skewed by up to 30 seconds and offline replay: 64 of 2,855 alarms (2.2%) reached the live feed after an alarm from the same room with a later timestamp, 50 of them within clock skew of their arrival and 14 replayed late. `GET /alarms?since=0` returned all 2,855 in timestamp order.
 
 ### Linux capacity and scenario runs
 
