@@ -203,6 +203,28 @@ Database row deltas matched both accepted events and accepted falls and remained
 
 The explicit full-offer validation failed and the load CLI exited nonzero. The 50,000/s target remains unmet. This isolated target phase does not replace the complete baseline, repeated bursts, offline replay and recovery scenario.
 
+## Capacity and interrupted-commit validation (15–16 Nov 2026)
+
+The next independent pass reproduced a recovery failure beyond the earlier tests: an API timeout or SIGKILL could leave an old PostgreSQL transaction pending after allocating alarm ID 1. Its replacement could commit ID 2 first; a consumer saving cursor 2 would then miss ID 1 when it eventually committed. Fall/mixed batches now take a PostgreSQL transaction advisory fence before any alarm ID allocation. Both the suppressed-cancel timeout and direct SIGKILL/restart reproductions verify that the replacement waits and the feed delivers IDs 1 then 2. Ordinary batches use a smaller statement without the alarm CTE.
+
+The long-run reader also exposed fractional-duration accumulation returning `known_seconds=60.00000000000023` and negative unknown time. Occupancy now sums exact durations and converts to seconds once; a dense-transition regression covers this. The first failed long run remains recorded in the review evidence. Mathematical values just above 1 are now rejected for confidence/magnitude instead of passing through float rounding.
+
+The server, PostgreSQL and generator shared a Linux environment reporting nine CPUs, Go 1.26.11 and PostgreSQL 16.2. Durability settings stayed enabled. These results are not a controlled comparison with the four-CPU Windows Docker VM.
+
+| Run | Result | Acknowledged falls on feed | Fall POST-to-feed p95 |
+|---|---|---|---|
+| 30-second closed-loop throughput | 1,755,375 accepted; 58,477/s over 30.018s | 23,162 of 23,162 | 28.714 ms |
+| 5-minute scenario, first 30-second 50K/s burst | 1,500,000 scheduled, sent and accepted | 19,826 of 19,826 | 18.650 ms |
+| Same scenario, second 30-second 50K/s burst | 1,500,000 scheduled, sent and accepted | 19,746 of 19,746 | 16.894 ms |
+
+The complete scenario scheduled and sent 4,200,000 events. All were acknowledged: 4,199,967 fresh acceptances and 33 duplicate acknowledgements after retries. The final journal held exactly 4,200,000 events and 55,361 alarms; every acknowledged fall reached the feed. All 60,000 events buffered during the 20%-device, 60-second outage replayed. The API was hard-killed at 180.442s and ready again at 180.772s. There were no final HTTP/transport errors, unsent events or unflushed offline events. All 61 live read checks passed; those checked shape/ranges, not an independent aggregation oracle. Database counts persisted after the final API stop.
+
+The generator previously dropped scheduled work even against an immediate-response endpoint. Its default bounded queue is unchanged; these fixed-rate runs explicitly used 16,384 scheduled slots, 327.68ms at 50K/s. The two burst cohorts' schedule-to-feed p95s were 100.119ms and 25.902ms, so queueing was included in the observed deadline. Actual starts and acknowledgements beyond each phase remain in the JSON. No ACK-before-commit, disabled durability, multi-event API or hidden tail was used.
+
+Final verification passed 105 top-level tests plus 56 subtests with race detection, vet and the documented pooled-DSN preservation check. Readiness still requires the documented single-instance/coordinated-upgrade model. Strict chronological room delivery for arbitrarily late events remains a stated tradeoff; retention remains design-only. No private grader score is inferred.
+
+Raw summaries and phase accounting: [full scenario](docs/benchmarks/full-scenario.json), [closed-loop capacity](docs/benchmarks/closed-loop-30s.json). The traffic command is in README; process lifecycle, live queries and database reconciliation were driven separately.
+
 ## Run
 
 ```bash

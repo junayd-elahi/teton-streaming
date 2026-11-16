@@ -1,0 +1,580 @@
+{
+  "environment": {
+    "reported_cpus": 9,
+    "go": "go1.26.11",
+    "postgresql": "16.2",
+    "placement": "API, PostgreSQL and generator colocated on Linux",
+    "fsync": "on",
+    "synchronous_commit": "on",
+    "full_page_writes": "on",
+    "shared_buffers": "128MB",
+    "independent_aggregation_ground_truth_oracle": false,
+    "physical_cpu_quota_verified": false
+  },
+  "summary": {
+    "label": "combined-full-300s-v2",
+    "synthetic_only": true,
+    "server_sha256": "810a2e350642c9aafcf396b4505e6c5d8dcc30bf6bfae89999727878adf83639",
+    "load_sha256": "845c4905d82c188b6f2a6e467c77ca16f41dbbef87b5dce2bca3a3a550bf8bbd",
+    "duration_seconds": 300,
+    "rate": 5000,
+    "burst_rate": 50000,
+    "burst_1_start_seconds": 30,
+    "burst_2_start_seconds": 210,
+    "burst_duration_seconds": 30,
+    "offline_start_seconds": 90,
+    "offline_duration_seconds": 60,
+    "offline_percent": 20,
+    "api_kill_offset_seconds": 180.442,
+    "api_restart_offset_seconds": 180.772,
+    "api_restart_count": {
+      "events": 2250571,
+      "alarms": 29704,
+      "fall_events": 29704
+    },
+    "api_restart_durable_count": {
+      "events": 2252680,
+      "alarms": 29738,
+      "fall_events": 29738
+    },
+    "before": {
+      "events": 0,
+      "alarms": 0,
+      "fall_events": 0
+    },
+    "after": {
+      "events": 4200000,
+      "alarms": 55361,
+      "fall_events": 55361
+    },
+    "after_api_stop": {
+      "events": 4200000,
+      "alarms": 55361,
+      "fall_events": 55361
+    },
+    "accepted": 4199967,
+    "duplicate_acknowledged": 33,
+    "request_post_p95_ms_aggregate": 39.357,
+    "offered": 4200000,
+    "sent": 4200000,
+    "not_sent": 0,
+    "offline_buffered": 60000,
+    "offline_replayed": 60000,
+    "offline_dropped": 0,
+    "offline_unflushed": 0,
+    "falls_accepted": 55361,
+    "alarms_delta": 55361,
+    "burst_metrics": {
+      "burst_1": {
+        "scheduled": 1500000,
+        "sent": 1500000,
+        "accepted": 1500000,
+        "duplicate": 0,
+        "schedule_to_feed_p95_ms": 100.11925,
+        "post_to_feed_p95_ms": 18.6495,
+        "feed_sample_count": 19826
+      },
+      "burst_2": {
+        "scheduled": 1500000,
+        "sent": 1500000,
+        "accepted": 1500000,
+        "duplicate": 0,
+        "schedule_to_feed_p95_ms": 25.9015,
+        "post_to_feed_p95_ms": 16.894,
+        "feed_sample_count": 19746
+      }
+    },
+    "read_samples": 61,
+    "read_errors": 0,
+    "read_check_scope": "HTTP shape/range/readability only; not an independent ground-truth oracle",
+    "validation_status": "met",
+    "load_exit": 0
+  },
+  "load_report": {
+    "started": "2026-11-16T00:13:50.752597482Z",
+    "elapsed_seconds": 300.005934648,
+    "config": {
+      "target": "http://127.0.0.1:18080",
+      "senders": 2000,
+      "offer_buffer": 16384,
+      "devices": 5000,
+      "duration_ns": 300000000000,
+      "rate": 5000,
+      "burst_rate": 50000,
+      "burst_start_ns": 30000000000,
+      "burst_duration_ns": 30000000000,
+      "second_burst_start_ns": 210000000000,
+      "offline_start_ns": 90000000000,
+      "offline_duration_ns": 60000000000,
+      "offline_percent": 20,
+      "offline_buffer_capacity_per_sender": 1000,
+      "retries": 10,
+      "strict_offer_window": false,
+      "require_full_offer": true,
+      "require_all_accepted": true,
+      "require_no_loss": true,
+      "min_accepted_rate": 0,
+      "max_request_p95_ms": 0,
+      "max_fall_p95_ms": 1000
+    },
+    "environment": {
+      "go_version": "go1.26.11",
+      "goarch": "amd64",
+      "gomaxprocs": 9,
+      "goos": "linux",
+      "num_cpu": 9
+    },
+    "offered": 4200000,
+    "not_sent": 0,
+    "accepted": 4199967,
+    "duplicate": 33,
+    "invalid_400": 0,
+    "conflict_409": 0,
+    "overloaded_503": 0,
+    "other_status": 0,
+    "transport_errors": 0,
+    "retried_attempts": 3191,
+    "offline_buffered": 60000,
+    "offline_replayed": 60000,
+    "offline_dropped": 0,
+    "offline_unflushed": 0,
+    "starts_after_offer_window": 1,
+    "durable_acks_after_offer_window": 15,
+    "sent": 4200000,
+    "expired_before_send": 0,
+    "phases": [
+      {
+        "actual_starts_during_phase": 149999,
+        "actual_durable_acks_during_phase": 149987,
+        "name": "baseline",
+        "start_seconds": 0,
+        "end_seconds": 30,
+        "scheduled_rate": 5000,
+        "scheduled": 150000,
+        "sent": 150000,
+        "not_sent": 0,
+        "accepted": 150000,
+        "duplicate": 0,
+        "invalid_400": 0,
+        "conflict_409": 0,
+        "overloaded_503": 0,
+        "other_status": 0,
+        "transport_errors": 0,
+        "starts_within_phase": 149999,
+        "starts_after_phase": 1,
+        "durable_ack_within_phase": 149987,
+        "durable_ack_after_phase": 13,
+        "accepted_per_phase_second": 5000,
+        "reconciles": true,
+        "schedule_to_send_latency": {
+          "count": 150000,
+          "p50_ms": 0.392,
+          "p95_ms": 1.022,
+          "p99_ms": 1.165,
+          "max_ms": 32.61
+        },
+        "generation_to_ack_latency": {
+          "count": 150000,
+          "p50_ms": 4.427,
+          "p95_ms": 7.730049999999989,
+          "p99_ms": 9.678040000000037,
+          "max_ms": 60.518
+        },
+        "schedule_to_ack_latency": {
+          "count": 150000,
+          "p50_ms": 4.883,
+          "p95_ms": 8.281,
+          "p99_ms": 10.466,
+          "max_ms": 60.74
+        },
+        "fall_post_to_feed_latency": {
+          "count": 1984,
+          "p50_ms": 0.958,
+          "p95_ms": 2.4968499999999945,
+          "p99_ms": 4.130160000000004,
+          "max_ms": 41.105
+        },
+        "fall_generation_to_feed_latency": {
+          "count": 1984,
+          "p50_ms": 0.962,
+          "p95_ms": 2.5006999999999944,
+          "p99_ms": 4.131840000000004,
+          "max_ms": 41.107
+        },
+        "fall_schedule_to_feed_latency": {
+          "count": 1984,
+          "p50_ms": 1.457,
+          "p95_ms": 2.967799999999999,
+          "p99_ms": 5.036320000000014,
+          "max_ms": 41.344
+        }
+      },
+      {
+        "actual_starts_during_phase": 1499973,
+        "actual_durable_acks_during_phase": 1499080,
+        "name": "burst_1",
+        "start_seconds": 30,
+        "end_seconds": 60,
+        "scheduled_rate": 50000,
+        "scheduled": 1500000,
+        "sent": 1500000,
+        "not_sent": 0,
+        "accepted": 1500000,
+        "duplicate": 0,
+        "invalid_400": 0,
+        "conflict_409": 0,
+        "overloaded_503": 0,
+        "other_status": 0,
+        "transport_errors": 0,
+        "starts_within_phase": 1499972,
+        "starts_after_phase": 28,
+        "durable_ack_within_phase": 1499067,
+        "durable_ack_after_phase": 933,
+        "accepted_per_phase_second": 50000,
+        "reconciles": true,
+        "schedule_to_send_latency": {
+          "count": 1500000,
+          "p50_ms": 0.37,
+          "p95_ms": 83.095,
+          "p99_ms": 125.186,
+          "max_ms": 168.889
+        },
+        "generation_to_ack_latency": {
+          "count": 1500000,
+          "p50_ms": 16.615,
+          "p95_ms": 46.748,
+          "p99_ms": 77.09101000000001,
+          "max_ms": 228.135
+        },
+        "schedule_to_ack_latency": {
+          "count": 1500000,
+          "p50_ms": 17.477,
+          "p95_ms": 122.903,
+          "p99_ms": 169.75107000000006,
+          "max_ms": 239.253
+        },
+        "fall_post_to_feed_latency": {
+          "count": 19826,
+          "p50_ms": 4.6125,
+          "p95_ms": 18.6495,
+          "p99_ms": 35.356,
+          "max_ms": 143.885
+        },
+        "fall_generation_to_feed_latency": {
+          "count": 19826,
+          "p50_ms": 4.7035,
+          "p95_ms": 19.51725,
+          "p99_ms": 35.78075,
+          "max_ms": 163.102
+        },
+        "fall_schedule_to_feed_latency": {
+          "count": 19826,
+          "p50_ms": 5.6665,
+          "p95_ms": 100.11925,
+          "p99_ms": 147.508,
+          "max_ms": 213.158
+        }
+      },
+      {
+        "actual_starts_during_phase": 750028,
+        "actual_durable_acks_during_phase": 750915,
+        "name": "between_bursts",
+        "start_seconds": 60,
+        "end_seconds": 210,
+        "scheduled_rate": 5000,
+        "scheduled": 750000,
+        "sent": 750000,
+        "not_sent": 0,
+        "accepted": 749967,
+        "duplicate": 33,
+        "invalid_400": 0,
+        "conflict_409": 0,
+        "overloaded_503": 0,
+        "other_status": 0,
+        "transport_errors": 0,
+        "starts_within_phase": 750000,
+        "starts_after_phase": 0,
+        "durable_ack_within_phase": 749982,
+        "durable_ack_after_phase": 18,
+        "accepted_per_phase_second": 4999.78,
+        "reconciles": true,
+        "schedule_to_send_latency": {
+          "count": 750000,
+          "p50_ms": 0.457,
+          "p95_ms": 23253.452649999974,
+          "p99_ms": 52849.33043000001,
+          "max_ms": 60422.273
+        },
+        "generation_to_ack_latency": {
+          "count": 750000,
+          "p50_ms": 4.731,
+          "p95_ms": 23267.854499999947,
+          "p99_ms": 52868.6552,
+          "max_ms": 60465.376
+        },
+        "schedule_to_ack_latency": {
+          "count": 750000,
+          "p50_ms": 5.245,
+          "p95_ms": 23268.613699999947,
+          "p99_ms": 52868.766200000005,
+          "max_ms": 60466.23
+        },
+        "fall_post_to_feed_latency": {
+          "count": 9853,
+          "p50_ms": 0.981,
+          "p95_ms": 5.897799999999999,
+          "p99_ms": 21.625319999999853,
+          "max_ms": 365.92
+        },
+        "fall_generation_to_feed_latency": {
+          "count": 9853,
+          "p50_ms": 0.986,
+          "p95_ms": 22425.078599999997,
+          "p99_ms": 53732.28887999999,
+          "max_ms": 60023.482
+        },
+        "fall_schedule_to_feed_latency": {
+          "count": 9853,
+          "p50_ms": 1.507,
+          "p95_ms": 22425.655,
+          "p99_ms": 53732.973439999994,
+          "max_ms": 60024.018
+        }
+      },
+      {
+        "actual_starts_during_phase": 1499959,
+        "actual_durable_acks_during_phase": 1498692,
+        "name": "burst_2",
+        "start_seconds": 210,
+        "end_seconds": 240,
+        "scheduled_rate": 50000,
+        "scheduled": 1500000,
+        "sent": 1500000,
+        "not_sent": 0,
+        "accepted": 1500000,
+        "duplicate": 0,
+        "invalid_400": 0,
+        "conflict_409": 0,
+        "overloaded_503": 0,
+        "other_status": 0,
+        "transport_errors": 0,
+        "starts_within_phase": 1499959,
+        "starts_after_phase": 41,
+        "durable_ack_within_phase": 1498674,
+        "durable_ack_after_phase": 1326,
+        "accepted_per_phase_second": 50000,
+        "reconciles": true,
+        "schedule_to_send_latency": {
+          "count": 1500000,
+          "p50_ms": 0.215,
+          "p95_ms": 8.971,
+          "p99_ms": 32.137,
+          "max_ms": 72.517
+        },
+        "generation_to_ack_latency": {
+          "count": 1500000,
+          "p50_ms": 14.07,
+          "p95_ms": 40.31205000000005,
+          "p99_ms": 58.681,
+          "max_ms": 145.55
+        },
+        "schedule_to_ack_latency": {
+          "count": 1500000,
+          "p50_ms": 14.557,
+          "p95_ms": 47.583,
+          "p99_ms": 76.307,
+          "max_ms": 155.345
+        },
+        "fall_post_to_feed_latency": {
+          "count": 19746,
+          "p50_ms": 3.615,
+          "p95_ms": 16.894,
+          "p99_ms": 29.319799999999972,
+          "max_ms": 72.15
+        },
+        "fall_generation_to_feed_latency": {
+          "count": 19746,
+          "p50_ms": 3.639,
+          "p95_ms": 18.8325,
+          "p99_ms": 31.535799999999973,
+          "max_ms": 72.153
+        },
+        "fall_schedule_to_feed_latency": {
+          "count": 19746,
+          "p50_ms": 4.1195,
+          "p95_ms": 25.9015,
+          "p99_ms": 51.73089999999997,
+          "max_ms": 89.033
+        }
+      },
+      {
+        "actual_starts_during_phase": 300040,
+        "actual_durable_acks_during_phase": 301311,
+        "name": "post_burst",
+        "start_seconds": 240,
+        "end_seconds": 300,
+        "scheduled_rate": 5000,
+        "scheduled": 300000,
+        "sent": 300000,
+        "not_sent": 0,
+        "accepted": 300000,
+        "duplicate": 0,
+        "invalid_400": 0,
+        "conflict_409": 0,
+        "overloaded_503": 0,
+        "other_status": 0,
+        "transport_errors": 0,
+        "starts_within_phase": 299999,
+        "starts_after_phase": 1,
+        "durable_ack_within_phase": 299985,
+        "durable_ack_after_phase": 15,
+        "accepted_per_phase_second": 5000,
+        "reconciles": true,
+        "schedule_to_send_latency": {
+          "count": 300000,
+          "p50_ms": 0.402,
+          "p95_ms": 1.024,
+          "p99_ms": 1.145,
+          "max_ms": 61.326
+        },
+        "generation_to_ack_latency": {
+          "count": 300000,
+          "p50_ms": 4.448,
+          "p95_ms": 7.887,
+          "p99_ms": 13.860050000000047,
+          "max_ms": 123.823
+        },
+        "schedule_to_ack_latency": {
+          "count": 300000,
+          "p50_ms": 4.902,
+          "p95_ms": 8.444,
+          "p99_ms": 18.274100000000093,
+          "max_ms": 125.508
+        },
+        "fall_post_to_feed_latency": {
+          "count": 3952,
+          "p50_ms": 1.004,
+          "p95_ms": 2.2593499999999995,
+          "p99_ms": 4.761739999999994,
+          "max_ms": 70.85
+        },
+        "fall_generation_to_feed_latency": {
+          "count": 3952,
+          "p50_ms": 1.008,
+          "p95_ms": 2.2676999999999987,
+          "p99_ms": 4.766249999999994,
+          "max_ms": 70.853
+        },
+        "fall_schedule_to_feed_latency": {
+          "count": 3952,
+          "p50_ms": 1.487,
+          "p95_ms": 2.919799999999999,
+          "p99_ms": 5.836939999999955,
+          "max_ms": 71.775
+        }
+      }
+    ],
+    "scheduled_queue_capacity": 16384,
+    "reconciles": true,
+    "accepted_per_second": 13999.61305741456,
+    "request_mean_ms": 15.012682945714285,
+    "request_latency": {
+      "count": 4200000,
+      "p50_ms": 11.798,
+      "p95_ms": 39.357,
+      "p99_ms": 62.54501999999955,
+      "max_ms": 213.567
+    },
+    "falls_sent": 55361,
+    "falls_accepted": 55361,
+    "falls_delivered": 55361,
+    "falls_missing": 0,
+    "falls_duplicated": 0,
+    "fall_post_to_feed_latency": {
+      "count": 55361,
+      "p50_ms": 2.775,
+      "p95_ms": 15.87,
+      "p99_ms": 29.669000000000057,
+      "max_ms": 365.92
+    },
+    "fall_generation_to_feed_latency": {
+      "count": 55361,
+      "p50_ms": 2.82,
+      "p95_ms": 19.295,
+      "p99_ms": 18029.003200000057,
+      "max_ms": 60023.482
+    },
+    "fall_schedule_to_feed_latency": {
+      "count": 55361,
+      "p50_ms": 3.278,
+      "p95_ms": 57.907,
+      "p99_ms": 18029.346400000057,
+      "max_ms": 60024.018
+    },
+    "validation_status": "met",
+    "validation_requested": true,
+    "validation_passed": true,
+    "validation_checks": [
+      {
+        "name": "counts_reconcile",
+        "status": "MET",
+        "observed": "true",
+        "threshold": "true"
+      },
+      {
+        "name": "full_offer_sent",
+        "status": "MET",
+        "observed": "offered=4200000, not_sent=0, rate=5000/s",
+        "threshold": "paced rate > 0, offered > 0 and not_sent=0"
+      },
+      {
+        "name": "fall_feed_no_loss",
+        "status": "MET",
+        "observed": "accepted_falls=55361, missing=0",
+        "threshold": "at least one accepted fall and missing=0"
+      },
+      {
+        "name": "all_sent_acknowledged",
+        "status": "MET",
+        "observed": "sent=4200000, acknowledged=4200000",
+        "threshold": "at least one sent event and every sent event acknowledged"
+      },
+      {
+        "name": "fall_post_to_feed_p95",
+        "status": "MET",
+        "observed": "count=55361, p95=15.870ms",
+        "threshold": "count > 0 and aggregate p95 <= 1000.000ms"
+      },
+      {
+        "name": "fall_p95_baseline",
+        "status": "MET",
+        "observed": "count=1984, p95=2.497ms",
+        "threshold": "phase p95 <= 1000.000ms"
+      },
+      {
+        "name": "fall_p95_burst_1",
+        "status": "MET",
+        "observed": "count=19826, p95=18.649ms",
+        "threshold": "phase p95 <= 1000.000ms"
+      },
+      {
+        "name": "fall_p95_between_bursts",
+        "status": "MET",
+        "observed": "count=9853, p95=5.898ms",
+        "threshold": "phase p95 <= 1000.000ms"
+      },
+      {
+        "name": "fall_p95_burst_2",
+        "status": "MET",
+        "observed": "count=19746, p95=16.894ms",
+        "threshold": "phase p95 <= 1000.000ms"
+      },
+      {
+        "name": "fall_p95_post_burst",
+        "status": "MET",
+        "observed": "count=3952, p95=2.259ms",
+        "threshold": "phase p95 <= 1000.000ms"
+      }
+    ]
+  }
+}

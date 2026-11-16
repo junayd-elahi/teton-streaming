@@ -50,7 +50,6 @@ func (g funcGauge) write(b *bytes.Buffer, name string) {
 type Histogram struct {
 	bounds  []float64
 	buckets []atomic.Uint64 // per-bucket (not cumulative); last slot is +Inf
-	count   atomic.Uint64
 	sumBits atomic.Uint64
 }
 
@@ -76,7 +75,6 @@ func newHistogram(bounds []float64) *Histogram {
 func (h *Histogram) Observe(v float64) {
 	i := sort.SearchFloat64s(h.bounds, v) // first bound >= v
 	h.buckets[i].Add(1)
-	h.count.Add(1)
 	for {
 		old := h.sumBits.Load()
 		next := math.Float64bits(math.Float64frombits(old) + v)

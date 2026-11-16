@@ -128,6 +128,47 @@ type BatchResult struct {
 	NewAlarms int       // logical falls first seen in this batch
 }
 
+// Ordinary writer lanes do not create alarms. Avoid materializing each full
+// inserted payload and scanning an empty alarm relation for those batches.
+const appendOrdinarySQL = `INSERT INTO event_log (device_id, seq, room_id, type, ts, payload, payload_hash, received_at)
+		SELECT device_id, seq, room_id, type, ts, payload::jsonb, payload_hash, received_at
+		FROM unnest($1::text[], $2::bigint[], $3::text[], $4::text[], $5::timestamptz[],
+		            $6::text[], $7::bytea[], $8::timestamptz[])
+		     WITH ORDINALITY AS t(device_id, seq, room_id, type, ts, payload, payload_hash, received_at, ord)
+		ORDER BY ord
+		ON CONFLICT (device_id, seq, ts) DO NOTHING
+		RETURNING device_id, seq, ts, 0`
+
+// Fence fall transactions in PostgreSQL, not just in the Go writer. A timed-out
+// or disconnected writer can leave a transaction running while its replacement
+// starts on another connection. The fence is held until commit/rollback and must
+// precede all alarm identity allocation, so cursors cannot pass an older commit.
+// Advisory locks are database-local; the namespace and actual alarms table OID
+// isolate this fence from other tables and schema-isolated test instances.
+const appendWithAlarmsSQL = `
+		WITH alarm_writer_fence AS MATERIALIZED (
+			SELECT pg_advisory_xact_lock(1413829711, 'alarms'::regclass::oid::integer)
+		), inserted AS (
+			INSERT INTO event_log (device_id, seq, room_id, type, ts, payload, payload_hash, received_at)
+			SELECT device_id, seq, room_id, type, ts, payload::jsonb, payload_hash, received_at
+			FROM unnest($1::text[], $2::bigint[], $3::text[], $4::text[], $5::timestamptz[],
+			            $6::text[], $7::bytea[], $8::timestamptz[])
+			     WITH ORDINALITY AS t(device_id, seq, room_id, type, ts, payload, payload_hash, received_at, ord)
+			CROSS JOIN alarm_writer_fence
+			ORDER BY ord
+			ON CONFLICT (device_id, seq, ts) DO NOTHING
+			RETURNING id, device_id, seq, room_id, type, ts, payload, received_at
+		), new_alarms AS (
+			INSERT INTO alarms (device_id, room_id, ts, confidence, seq, received_at)
+			SELECT device_id, room_id, ts, (payload->>'confidence')::float8, seq, received_at
+			FROM inserted
+			WHERE type = 'fall_warn'
+			ORDER BY id
+			ON CONFLICT (device_id, room_id, ts, confidence) DO NOTHING
+			RETURNING 1
+		)
+		SELECT device_id, seq, ts, (SELECT count(*) FROM new_alarms) FROM inserted`
+
 // AppendBatch commits the events to the journal atomically, in slice order, and reports one Outcome per event. Every newly journaled fall_warn
 // also creates its alarm in the same transaction, unless an alarm for the same
 // logical fall already exists. An identity (device_id, seq, ts) that is
@@ -144,7 +185,9 @@ func (s *Store) AppendBatch(ctx context.Context, events []Event) (BatchResult, e
 	payloads := make([]string, n)
 	hashes := make([][]byte, n)
 	receivedAts := make([]time.Time, n)
+	hasFalls := false
 	for i, e := range events {
+		hasFalls = hasFalls || e.Type == "fall_warn"
 		deviceIDs[i], seqs[i], roomIDs[i], types[i] = e.DeviceID, e.Seq, e.RoomID, e.Type
 		tss[i], payloads[i], hashes[i], receivedAts[i] = e.TS, string(e.Payload), e.PayloadHash, e.ReceivedAt
 	}
@@ -152,26 +195,11 @@ func (s *Store) AppendBatch(ctx context.Context, events []Event) (BatchResult, e
 	// One statement, so the events and their alarms commit together or not at
 	// all. It inserts in arrival order, derives alarms from the rows it
 	// actually inserted, and returns the identities of those rows.
-	rows, err := s.pool.Query(ctx, `
-		WITH inserted AS (
-			INSERT INTO event_log (device_id, seq, room_id, type, ts, payload, payload_hash, received_at)
-			SELECT device_id, seq, room_id, type, ts, payload::jsonb, payload_hash, received_at
-			FROM unnest($1::text[], $2::bigint[], $3::text[], $4::text[], $5::timestamptz[],
-			            $6::text[], $7::bytea[], $8::timestamptz[])
-			     WITH ORDINALITY AS t(device_id, seq, room_id, type, ts, payload, payload_hash, received_at, ord)
-			ORDER BY ord
-			ON CONFLICT (device_id, seq, ts) DO NOTHING
-			RETURNING id, device_id, seq, room_id, type, ts, payload, received_at
-		), new_alarms AS (
-			INSERT INTO alarms (device_id, room_id, ts, confidence, seq, received_at)
-			SELECT device_id, room_id, ts, (payload->>'confidence')::float8, seq, received_at
-			FROM inserted
-			WHERE type = 'fall_warn'
-			ORDER BY id
-			ON CONFLICT (device_id, room_id, ts, confidence) DO NOTHING
-			RETURNING 1
-		)
-		SELECT device_id, seq, ts, (SELECT count(*) FROM new_alarms) FROM inserted`,
+	statement := appendOrdinarySQL
+	if hasFalls {
+		statement = appendWithAlarmsSQL
+	}
+	rows, err := s.pool.Query(ctx, statement,
 		deviceIDs, seqs, roomIDs, types, tss, payloads, hashes, receivedAts)
 	if err != nil {
 		return BatchResult{}, err

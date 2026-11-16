@@ -48,3 +48,18 @@ func TestIntegrateOccupancy(t *testing.T) {
 		}
 	}
 }
+
+func TestDenseFractionalTransitionsStayWithinTheExactWindow(t *testing.T) {
+	previous := &Transition{At: at(-1), InRoom: true}
+	transitions := make([]Transition, 3000)
+	for i := range transitions {
+		transitions[i] = Transition{
+			At:     noon.Add(time.Duration(i+1) * 20 * time.Millisecond),
+			InRoom: (i+1)%2 == 0,
+		}
+	}
+	got := IntegrateOccupancy(noon, at(60), previous, transitions)
+	if got.KnownSeconds != 60 || got.OccupiedSeconds != 30 || !got.InRoom {
+		t.Fatalf("fractional transitions escaped exact window totals: %+v", got)
+	}
+}

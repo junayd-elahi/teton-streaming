@@ -73,16 +73,18 @@ func followFeed(client *http.Client, target string, cursor int64, prefix string,
 // Devices and sequences are unique within a run. Correlate those event fields
 // independently of the service's public event_id format.
 type fallTracker struct {
-	mu          sync.Mutex
-	sentAt      map[string]time.Time
-	acceptedIDs map[string]bool
-	deliveredAt map[string]time.Time
-	duplicates  int64
+	mu                       sync.Mutex
+	sentAt                   map[string]time.Time
+	generatedAt, scheduledAt map[string]time.Time
+	acceptedIDs              map[string]bool
+	deliveredAt              map[string]time.Time
+	duplicates               int64
 }
 
 func newFallTracker() *fallTracker {
 	return &fallTracker{
 		sentAt:      make(map[string]time.Time),
+		generatedAt: make(map[string]time.Time), scheduledAt: make(map[string]time.Time),
 		acceptedIDs: make(map[string]bool),
 		deliveredAt: make(map[string]time.Time),
 	}
@@ -94,6 +96,13 @@ func (f *fallTracker) sent(deviceID string, seq int64, at time.Time) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.sentAt[eventID(deviceID, seq)] = at
+}
+
+func (f *fallTracker) generated(deviceID string, seq int64, generated, scheduled time.Time) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	id := eventID(deviceID, seq)
+	f.generatedAt[id], f.scheduledAt[id] = generated, scheduled
 }
 
 func (f *fallTracker) accepted(deviceID string, seq int64) {
@@ -134,12 +143,39 @@ func (f *fallTracker) waitForDelivery(limit time.Duration) {
 
 // latenciesMicros returns, for every delivered fall, the time from just before
 // its POST was sent to its arrival on the feed.
-func (f *fallTracker) latenciesMicros() []uint32 {
+func (f *fallTracker) latenciesMicros() []uint32 { return f.latencyFrom(f.sentAt) }
+
+// latencyFrom excludes unrelated or untracked feed observations.
+func (f *fallTracker) latencyFrom(origins map[string]time.Time) []uint32 {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	out := make([]uint32, 0, len(f.deliveredAt))
 	for id, at := range f.deliveredAt {
-		out = append(out, uint32(at.Sub(f.sentAt[id]).Microseconds()))
+		if origin, ok := origins[id]; ok && !at.Before(origin) {
+			out = append(out, uint32(at.Sub(origin).Microseconds()))
+		}
 	}
 	return out
+}
+
+func (f *fallTracker) phaseLatencies(cfg config, started time.Time) (post, generated, scheduled [maxPhases][]uint32) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for id, delivered := range f.deliveredAt {
+		scheduledAt, ok := f.scheduledAt[id]
+		if !ok {
+			continue
+		}
+		i := phaseAt(cfg, scheduledAt.Sub(started))
+		if origin, ok := f.sentAt[id]; ok && !delivered.Before(origin) {
+			post[i] = append(post[i], uint32(delivered.Sub(origin).Microseconds()))
+		}
+		if origin, ok := f.generatedAt[id]; ok && !delivered.Before(origin) {
+			generated[i] = append(generated[i], uint32(delivered.Sub(origin).Microseconds()))
+		}
+		if !delivered.Before(scheduledAt) {
+			scheduled[i] = append(scheduled[i], uint32(delivered.Sub(scheduledAt).Microseconds()))
+		}
+	}
+	return
 }

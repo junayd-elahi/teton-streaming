@@ -29,13 +29,14 @@ func IntegrateOccupancy(start, end time.Time, predecessor *Transition, transitio
 	known := predecessor != nil
 	inRoom := known && predecessor.InRoom
 	cursor := start
+	var knownTime, occupiedTime time.Duration
 
 	advance := func(to time.Time) {
-		span := to.Sub(cursor).Seconds()
+		span := to.Sub(cursor)
 		if known {
-			result.KnownSeconds += span
+			knownTime += span
 			if inRoom {
-				result.OccupiedSeconds += span
+				occupiedTime += span
 			}
 		}
 		cursor = to
@@ -45,6 +46,10 @@ func IntegrateOccupancy(start, end time.Time, predecessor *Transition, transitio
 		known, inRoom = true, t.InRoom
 	}
 	advance(end)
+	// Sum exact durations before converting once. Repeated float additions
+	// can otherwise exceed the window and produce negative unknown seconds.
+	result.KnownSeconds = knownTime.Seconds()
+	result.OccupiedSeconds = occupiedTime.Seconds()
 	result.InRoom = inRoom
 	return result
 }

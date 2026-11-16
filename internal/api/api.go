@@ -11,6 +11,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -107,11 +108,11 @@ func (s *Server) postEvent(w http.ResponseWriter, r *http.Request) {
 			"error": "device_id, seq and ts already used with different content"})
 	case outcome == store.Duplicate:
 		s.metrics.EventsReceived.With("duplicate").Inc()
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "duplicate": true})
+		writeEventSuccess(w, true)
 	default:
 		s.metrics.EventsReceived.With("accepted").Inc()
 		s.metrics.EventsAccepted.With(event.Type).Inc()
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "duplicate": false})
+		writeEventSuccess(w, false)
 	}
 }
 
@@ -133,7 +134,8 @@ func parseEvent(body io.Reader, received time.Time) (store.Event, error) {
 	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
 		return store.Event{}, errors.New("body must hold exactly one complete json object within the size limit")
 	}
-	if err := validateStorable(raw); err != nil {
+	needsZeroNormalization := false
+	if err := validateStorable(raw, &needsZeroNormalization); err != nil {
 		return store.Event{}, err
 	}
 
@@ -187,7 +189,8 @@ func parseEvent(body io.Reader, received time.Time) (store.Event, error) {
 	// Preserve the original canonical-input hash for retry compatibility.
 	// PostgreSQL rejects extreme exponents even on mathematical zero. Store
 	// those zero exponent forms as plain zero after hashing the input.
-	if normalizeZeroExponents(raw) {
+	if needsZeroNormalization {
+		normalizeZeroExponents(raw)
 		canonical.Reset()
 		if err := enc.Encode(raw); err != nil {
 			return store.Event{}, err
@@ -280,16 +283,39 @@ func requiredUnitInterval(raw map[string]any, key string) error {
 	if err != nil {
 		return err
 	}
-	if v < 0 || v > 1 {
+	if v < 0 || v > 1 || (v == 1 && decimalGreaterThanOne(string(raw[key].(json.Number)))) {
 		return fmt.Errorf("%s must be between 0 and 1", key)
 	}
 	return nil
 }
 
+// decimalGreaterThanOne compares a validated, positive JSON decimal exactly.
+// It is needed only when float64 rounds the number to the upper endpoint 1.
+func decimalGreaterThanOne(literal string) bool {
+	coefficient := mantissa(literal)
+	exponent := 0
+	if len(coefficient) != len(literal) {
+		// A nonzero number already validated as finite and rounding to 1 has
+		// a small effective exponent; leading zeroes are accepted by Atoi.
+		exponent, _ = strconv.Atoi(literal[len(coefficient)+1:])
+	}
+	point := strings.IndexByte(coefficient, '.')
+	if point < 0 {
+		point = len(coefficient)
+	}
+	digits := strings.ReplaceAll(coefficient, ".", "")
+	significant := strings.TrimLeft(digits, "0")
+	integerDigits := point - (len(digits) - len(significant)) + exponent
+	if integerDigits != 1 {
+		return integerDigits > 1
+	}
+	return significant[0] > '1' || strings.ContainsAny(significant[1:], "123456789")
+}
+
 // validateStorable rejects values PostgreSQL cannot hold in a jsonb column,
 // anywhere in the event including fields this service does not interpret:
 // NUL characters in text, and numbers too long or too large to represent.
-func validateStorable(value any) error {
+func validateStorable(value any, needsZeroNormalization *bool) error {
 	switch v := value.(type) {
 	case string:
 		if strings.ContainsRune(v, 0) {
@@ -305,21 +331,26 @@ func validateStorable(value any) error {
 		}
 		// A literal such as 1e-400 parses to zero without an error. Reject it:
 		// it is not zero, and PostgreSQL cannot convert it to a float either.
-		if f == 0 && strings.ContainsAny(mantissa(string(v)), "123456789") {
-			return errors.New("number is out of range")
+		if f == 0 {
+			if strings.ContainsAny(mantissa(string(v)), "123456789") {
+				return errors.New("number is out of range")
+			}
+			if strings.ContainsAny(string(v), "eE") {
+				*needsZeroNormalization = true
+			}
 		}
 	case map[string]any:
 		for key, item := range v {
-			if err := validateStorable(key); err != nil {
-				return err
+			if strings.ContainsRune(key, 0) {
+				return errors.New("text must not contain NUL characters")
 			}
-			if err := validateStorable(item); err != nil {
+			if err := validateStorable(item, needsZeroNormalization); err != nil {
 				return err
 			}
 		}
 	case []any:
 		for _, item := range v {
-			if err := validateStorable(item); err != nil {
+			if err := validateStorable(item, needsZeroNormalization); err != nil {
 				return err
 			}
 		}
@@ -358,4 +389,21 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(body)
+}
+
+var (
+	acceptedJSON  = []byte("{\"duplicate\":false,\"ok\":true}\n")
+	duplicateJSON = []byte("{\"duplicate\":true,\"ok\":true}\n")
+)
+
+// The two successful ingest bodies are fixed. Pre-encoding avoids constructing
+// and sorting a map after each durable commit.
+func writeEventSuccess(w http.ResponseWriter, duplicate bool) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	body := acceptedJSON
+	if duplicate {
+		body = duplicateJSON
+	}
+	_, _ = w.Write(body)
 }
