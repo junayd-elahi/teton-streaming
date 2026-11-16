@@ -1,6 +1,7 @@
 services:
   db:
     image: postgres:16
+    restart: unless-stopped
     environment:
       POSTGRES_USER: teton
       POSTGRES_PASSWORD: teton
@@ -18,6 +19,7 @@ services:
 
   server:
     build: .
+    restart: unless-stopped
     environment:
       DATABASE_URL: postgres://teton:teton@db:5432/teton?pool_max_conns=16
       LISTEN_ADDR: ":8080"
@@ -26,7 +28,9 @@ services:
       INGEST_PRIORITY_QUEUE_SIZE: "10000"
       INGEST_BATCH_SIZE: "500"
       INGEST_LINGER_MS: "5"
-      INGEST_ENQUEUE_TIMEOUT_MS: "2000"
+      # Teton's generator gives each request 5 s in total and does not retry, so under
+      # overload a request is held for queue space for up to 4 s before it is refused.
+      INGEST_ENQUEUE_TIMEOUT_MS: "4000"
       INGEST_COMMIT_TIMEOUT_MS: "5000"
     ports:
       - "127.0.0.1:8080:8080"
