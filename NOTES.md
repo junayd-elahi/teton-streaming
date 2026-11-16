@@ -38,7 +38,7 @@ A separate HTTP verifier calculates occupancy by intersecting source presence in
 
 This check found a recent-replay defect missed by earlier tests: a 59-second-old heartbeat arriving after a current heartbeat replaced the clock estimate, excluding newer heartbeat slots. The query now chooses the newest eligible event-time sample; a matching index avoids a lifetime-history sort. The frozen-clock regression failed before the fix and passed afterward. All independent checks then passed: 66 occupancy reads, 28 health reads, four alarm snapshots, six feed/restart/journal checks and four retry assertions, alongside 5,580 ingestion acknowledgements for 5,576 distinct source events. These are not 5,688 distinct aggregation scenarios.
 
-The full race suite passes 106 top-level tests and 56 subtests. [The compact before/after evidence](docs/verification/aggregation-oracle.json) records scope, source hashes and interpretation limits; [the reusable verifier](tools/verification/README.md) documents how to reproduce the low-rate check. Short delivery delay is still indistinguishable from clock skew, and a backwards device-clock jump can retain the prior estimate until it catches up.
+The full race suite passes 108 top-level tests and 56 subtests. [The compact before/after evidence](docs/verification/aggregation-oracle.json) records scope, source hashes and interpretation limits; [the reusable verifier](tools/verification/README.md) documents how to reproduce the low-rate check. Short delivery delay is still indistinguishable from clock skew, and a backwards device-clock jump can retain the prior estimate until it catches up.
 
 ### Official generator at 5,000 devices
 
@@ -66,11 +66,12 @@ All five evaluator modes were run again at 50 devices from a fresh clone after t
 | burst | 130 s | 32,999 | 432 / 432 |
 | adversarial | 135 s | 26,404 | 339 / 339 |
 
-The burst and adversarial modes now deliver about twice as many events in the same time as in the earlier table, because the generator is no longer held back by the wait.
+Per second, burst mode now delivers about 2.9 times and adversarial mode about 2.6 times as many events as in the earlier table (254 against 88, and 196 against 76), because the generator is no longer held back by the wait. The durations differ between the two tables.
 
 A grader-shaped run from the same clone used the official generator in adversarial mode with 5,000 devices for 150 seconds, with the service hard-killed at 60 seconds and restarted one second later. The generator sent 111,382 events successfully and 87 failed, all of them refused connections during the outage. The journal held 111,382 rows, and 1,426 alarms matched 1,426 distinct journaled falls, the generator's own count of 1,426 distinct falls, and the 1,426 alarms returned by `GET /alarms?since=0`.
 
-A device that has never sent a heartbeat returns `last_heartbeat_ts: null` with availability 0.
+A device that has never sent a heartbeat returns `last_heartbeat_ts: null` with availability 0. A heartbeat dated up to 60 seconds ahead of the server clock is accepted as that device's newest clock sample: it moves `clock_offset_seconds` and `last_heartbeat_ts` forward until real time catches up, while availability changes little.
+
 ### Latest instrumented capacity checks
 
 Two fresh five-minute runs of the health fix used a 5,000/s baseline, two 30-second 50,000/s bursts, 20% of devices offline for 60 seconds, and API SIGKILL/restart after three minutes. Both failed the full-offer gate: the first sent and acknowledged 3,767,249 of 4,200,000 scheduled events; an unchanged quiet repeat sent and acknowledged 4,049,045. The generator never sent 432,751 and 150,955 events respectively. These are not demonstrated server refusals, but neither run proves the full scheduled target was handled.
@@ -80,6 +81,8 @@ Every acknowledged fall was delivered exactly once (49,758 and 53,508 respective
 The older successful measurements below are historical evidence under their recorded conditions. They do not override these newer unmet gates.
 
 ### Linux capacity and scenario runs
+
+The capacity and latency figures in this section, the section above and the Docker VM section were measured before the conditional batch wait and the heartbeat calibration fix, and were not repeated on the final commit. On the 2-CPU machine used for the official-generator runs, concurrent throughput was the same before and after the conditional wait.
 
 The server, PostgreSQL 16.2, and load process shared a Linux environment where Go reported 9 CPUs. Durability settings stayed enabled. This is not directly comparable with my 4-CPU Docker VM.
 

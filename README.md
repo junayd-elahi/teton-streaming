@@ -72,7 +72,7 @@ On Docker Desktop for Windows, running the load process inside the Compose netwo
 docker run --rm --network teton-streaming_default -v "${PWD}:/src" -w /src golang:1.26.11 go run ./tools/load -target http://server:8080 -senders 2000 -duration 60s -rate 5000 -burst-rate 50000 -burst-start 15s -burst-duration 30s -offer-buffer 16384
 ```
 
-Results are environment-specific: the 9-reported-CPU Linux closed-loop run reached 58,477 events/s, and a full scenario accepted two complete 50,000/s cohorts. The owner-reported run on my 4-CPU Docker VM reached about 13,200/s in its burst ([record](docs/benchmarks/windows-docker-reported.json)). See [NOTES.md](NOTES.md) and [docs/benchmarks](docs/benchmarks) for conditions and accounting. These are local measurements, not a grader score or certification.
+Results are environment-specific: the 9-reported-CPU Linux closed-loop run reached 58,477 events/s, and one full scenario accepted two complete 50,000/s cohorts. Two later repeats sent 90% and 96% of the schedule, so that target is not reliably met. The owner-reported run on my 4-CPU Docker VM reached about 13,200/s in its burst ([record](docs/benchmarks/windows-docker-reported.json)). See [NOTES.md](NOTES.md) and [docs/benchmarks](docs/benchmarks) for conditions and accounting. These are local measurements, not a grader score or certification.
 
 For the five-minute schedule, `tools/load` generates traffic but does not restart the service or independently inspect the database. Perform the hard kill/restart through the process manager and reconcile the journal separately. Do not use `docker compose down -v` against a database containing data you need.
 

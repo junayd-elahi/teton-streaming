@@ -7,15 +7,16 @@
     "repository": "https://github.com/Teton-ai/careers-challenge-streaming-backend",
     "commit": "ade2e2cba2d6157f9d1bec7e4821ea54026473d3",
     "source_sha256": {
-      "Makefile": "5d0d794bb56ceab2243d148a931d61ceed8c2a2249d457a3f3d715ed848ed8d8",
-      "README.md": "19d5823b075a691ceea583f14fa0dcb0fafc17f4243e2354f817ca943bb180af",
-      "SUBMISSION.md": "5313186f916c23d9a4709febdaa1304591aaab7cb68c092c1f3ce3b3a40f1ef0",
+      "Makefile": "933797d3df0ebdafd9594082192bfcdc896e0518cdbeb22089b0008ce9166bd7",
+      "README.md": "555788dbf295f3f512104f95894b8e2c84693ea16f2b628ac1b5b94ed2bf029a",
+      "SUBMISSION.md": "45b01ef2b44293156552f10aaffda5f7e83fcdfdb832762b5ba204b95a092a7e",
       "baseline_stub_smoke.txt": "4e54458decab3e49b1ab625d4eaae493f4bb9a87ffdef7553f03647cadd71220",
-      "docs/event_schema.md": "5470c6b142c53c0094e766b5079fcdd2cec4da80d61c9fd322296259a728952f",
-      "eval/check.py": "40977abd58687858d87e25e8a4858cc0bdeeb7862291eed1b54c3803d2938f23",
-      "event_generator/generate.py": "e84e1793212dc0e876fa4b00b3bffd6660423ae686db105be98880f7c0aa59b1",
-      "example_solution/service.py": "ec3ff12640a64cc4de7bc33cd8ebd84035d61bf913e679903b90680b082fef51"
-    }
+      "docs/event_schema.md": "4dbf385f30a9b1749f2c8e0fe4dfd1d7b16707e02b5b1c887f01e39a11649f72",
+      "eval/check.py": "79ba3e281c80e2ee9f066d38ec27dc5a5687b08b0fc92333c2e2c697fe29785c",
+      "event_generator/generate.py": "3ee265a4caebcd926e9d1205dc45b9a7c8bd9f8eb30bc7af94f06337695a1095",
+      "example_solution/service.py": "41ffc78a3a04aaf47af59e1e594d0b6abb4a8f089605682db4d1e457a864b587"
+    },
+    "source_sha256_note": "SHA-256 of each file as stored at the named commit (LF line endings), recomputed on 16 Nov 2026. baseline_stub_smoke.txt is a local run record, not a harness file."
   },
   "mode_isolation": "Each mode used a fresh private database; alarm history was not reused.",
   "modes": [
