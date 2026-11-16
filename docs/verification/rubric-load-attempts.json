@@ -289,6 +289,240 @@
           }
         }
       ]
+    },
+    {
+      "label": "unchanged quiet repeat",
+      "status": "failed_full_offer",
+      "duration_seconds": 300,
+      "configuration": {
+        "senders": 2000,
+        "offer_buffer": 16384,
+        "devices": 5000,
+        "duration_ns": 300000000000,
+        "rate": 5000,
+        "burst_rate": 50000,
+        "burst_start_ns": 30000000000,
+        "burst_duration_ns": 30000000000,
+        "second_burst_start_ns": 210000000000,
+        "offline_start_ns": 90000000000,
+        "offline_duration_ns": 60000000000,
+        "offline_percent": 20,
+        "offline_buffer_capacity_per_sender": 1000,
+        "retries": 10,
+        "strict_offer_window": false,
+        "require_full_offer": true,
+        "require_all_accepted": true,
+        "require_no_loss": true,
+        "min_accepted_rate": 0,
+        "max_request_p95_ms": 0,
+        "max_fall_p95_ms": 1000
+      },
+      "environment": {
+        "go_version": "go1.26.11",
+        "goarch": "amd64",
+        "gomaxprocs": 9,
+        "goos": "linux",
+        "num_cpu": 9
+      },
+      "postgresql": {
+        "server_version": "16.2",
+        "fsync": "on",
+        "synchronous_commit": "on",
+        "full_page_writes": "on"
+      },
+      "server_sha256": "149db4ed2fa9993bef0cd170153e747ccb2e94dd1854a7454a828dc7b6daad04",
+      "load_sha256": "6e83d3244746394bd3cfcdaf023b26a1b4e165880160fe98924a70b364eb44e9",
+      "offered": 4200000,
+      "sent": 4049045,
+      "not_sent": 150955,
+      "accepted": 4049044,
+      "duplicate": 1,
+      "falls_accepted": 53508,
+      "falls_delivered": 53508,
+      "falls_missing": 0,
+      "falls_duplicated": 0,
+      "fall_post_to_feed_latency": {
+        "count": 53508,
+        "p50_ms": 6.4805,
+        "p95_ms": 29.201649999999994,
+        "p99_ms": 51.44623,
+        "max_ms": 426.515
+      },
+      "offline_buffered": 60000,
+      "offline_replayed": 60000,
+      "offline_dropped": 0,
+      "offline_unflushed": 0,
+      "api_kill_offset_seconds": 180.3599904790001,
+      "api_ready_offset_seconds": 180.3964341830001,
+      "read_oracle": {
+        "passed": 565,
+        "failed": 0,
+        "occupancy_reads": 183,
+        "health_reads": 183,
+        "controlled_events": 199
+      },
+      "journal_after_api_stop": {
+        "all_events": 4049244,
+        "control_events": 199,
+        "alarms": 53508
+      },
+      "phases": [
+        {
+          "actual_starts_during_phase": 150000,
+          "actual_durable_acks_during_phase": 149974,
+          "name": "baseline",
+          "scheduled": 150000,
+          "sent": 150000,
+          "not_sent": 0,
+          "accepted": 150000,
+          "duplicate": 0,
+          "schedule_to_send_latency": {
+            "count": 150000,
+            "p50_ms": 0.388,
+            "p95_ms": 1.16,
+            "p99_ms": 4.384020000000018,
+            "max_ms": 57.588
+          },
+          "fall_post_to_feed_latency": {
+            "count": 1981,
+            "p50_ms": 1.535,
+            "p95_ms": 8.759,
+            "p99_ms": 95.4106000000003,
+            "max_ms": 284.996
+          },
+          "fall_schedule_to_feed_latency": {
+            "count": 1981,
+            "p50_ms": 2.065,
+            "p95_ms": 9.99,
+            "p99_ms": 96.08220000000024,
+            "max_ms": 285.475
+          }
+        },
+        {
+          "actual_starts_during_phase": 1384498,
+          "actual_durable_acks_during_phase": 1382524,
+          "name": "burst_1",
+          "scheduled": 1500000,
+          "sent": 1392647,
+          "not_sent": 107353,
+          "accepted": 1392647,
+          "duplicate": 0,
+          "schedule_to_send_latency": {
+            "count": 1392647,
+            "p50_ms": 276.592,
+            "p95_ms": 471.136,
+            "p99_ms": 705.6352400000002,
+            "max_ms": 832.859
+          },
+          "fall_post_to_feed_latency": {
+            "count": 18495,
+            "p50_ms": 10.797,
+            "p95_ms": 34.453999999999986,
+            "p99_ms": 71.72120000000002,
+            "max_ms": 426.515
+          },
+          "fall_schedule_to_feed_latency": {
+            "count": 18495,
+            "p50_ms": 290.226,
+            "p95_ms": 502.9551999999998,
+            "p99_ms": 724.6716600000003,
+            "max_ms": 869.913
+          }
+        },
+        {
+          "actual_starts_during_phase": 758149,
+          "actual_durable_acks_during_phase": 760122,
+          "name": "between_bursts",
+          "scheduled": 750000,
+          "sent": 750000,
+          "not_sent": 0,
+          "accepted": 749999,
+          "duplicate": 1,
+          "schedule_to_send_latency": {
+            "count": 750000,
+            "p50_ms": 0.449,
+            "p95_ms": 23612.845549999976,
+            "p99_ms": 52918.61551,
+            "max_ms": 60441.817
+          },
+          "fall_post_to_feed_latency": {
+            "count": 9819,
+            "p50_ms": 1.336,
+            "p95_ms": 12.483700000000002,
+            "p99_ms": 33.752359999999975,
+            "max_ms": 134.593
+          },
+          "fall_schedule_to_feed_latency": {
+            "count": 9819,
+            "p50_ms": 1.876,
+            "p95_ms": 24156.646700000027,
+            "p99_ms": 52177.01169999998,
+            "max_ms": 60435.746
+          }
+        },
+        {
+          "actual_starts_during_phase": 1451414,
+          "actual_durable_acks_during_phase": 1449441,
+          "name": "burst_2",
+          "scheduled": 1500000,
+          "sent": 1456398,
+          "not_sent": 43602,
+          "accepted": 1456398,
+          "duplicate": 0,
+          "schedule_to_send_latency": {
+            "count": 1456398,
+            "p50_ms": 8.76,
+            "p95_ms": 403.939,
+            "p99_ms": 552.3800900000001,
+            "max_ms": 618.077
+          },
+          "fall_post_to_feed_latency": {
+            "count": 19245,
+            "p50_ms": 8.338,
+            "p95_ms": 29.41899999999998,
+            "p99_ms": 44.97976000000006,
+            "max_ms": 83.929
+          },
+          "fall_schedule_to_feed_latency": {
+            "count": 19245,
+            "p50_ms": 23.817,
+            "p95_ms": 419.23479999999995,
+            "p99_ms": 579.3924400000001,
+            "max_ms": 665.149
+          }
+        },
+        {
+          "actual_starts_during_phase": 304981,
+          "actual_durable_acks_during_phase": 306955,
+          "name": "post_burst",
+          "scheduled": 300000,
+          "sent": 300000,
+          "not_sent": 0,
+          "accepted": 300000,
+          "duplicate": 0,
+          "schedule_to_send_latency": {
+            "count": 300000,
+            "p50_ms": 0.395,
+            "p95_ms": 1.064,
+            "p99_ms": 2.424,
+            "max_ms": 120.123
+          },
+          "fall_post_to_feed_latency": {
+            "count": 3968,
+            "p50_ms": 1.2,
+            "p95_ms": 3.753999999999993,
+            "p99_ms": 13.975999999999935,
+            "max_ms": 141.578
+          },
+          "fall_schedule_to_feed_latency": {
+            "count": 3968,
+            "p50_ms": 1.712,
+            "p95_ms": 4.4065499999999975,
+            "p99_ms": 16.71724999999998,
+            "max_ms": 141.782
+          }
+        }
+      ]
     }
   ]
 }

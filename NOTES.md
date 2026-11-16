@@ -40,6 +40,14 @@ This check found a recent-replay defect missed by earlier tests: a 59-second-old
 
 The full race suite passes 106 top-level tests and 56 subtests. [The compact before/after evidence](docs/verification/aggregation-oracle.json) records scope, source hashes and interpretation limits; [the reusable verifier](tools/verification/README.md) documents how to reproduce the low-rate check. Short delivery delay is still indistinguishable from clock skew, and a backwards device-clock jump can retain the prior estimate until it catches up.
 
+### Latest instrumented capacity checks
+
+Two fresh five-minute runs of the health fix used a 5,000/s baseline, two 30-second 50,000/s bursts, 20% of devices offline for 60 seconds, and API SIGKILL/restart after three minutes. Both failed the full-offer gate: the first sent and acknowledged 3,767,249 of 4,200,000 scheduled events; an unchanged quiet repeat sent and acknowledged 4,049,045. The generator never sent 432,751 and 150,955 events respectively. These are not demonstrated server refusals, but neither run proves the full scheduled target was handled.
+
+Every acknowledged fall was delivered exactly once (49,758 and 53,508 respectively), all 60,000 offline events replayed in each run, and acknowledged journal counts persisted after the API stopped. Each run passed 183 occupancy and 183 health reads against independent input truth on controlled devices in the same loaded database. This does not validate every load-generator event against an aggregation oracle. [Both attempt records](docs/verification/rubric-load-attempts.json) retain the failed gate, phase counts, latency and source hashes. The cause of the offered-load shortfall has not been isolated; the burst-capacity requirement remains a submission risk.
+
+The older successful measurements below are historical evidence under their recorded conditions. They do not override these newer unmet gates.
+
 ### Linux capacity and scenario runs
 
 The server, PostgreSQL 16.2, and load process shared a Linux environment where Go reported 9 CPUs. Durability settings stayed enabled. This is not directly comparable with my 4-CPU Docker VM.
