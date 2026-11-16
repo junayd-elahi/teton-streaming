@@ -1,147 +1,79 @@
 # Teton streaming backend
 
-A streaming backend for room-sensor events: it ingests device messages, journals them durably in PostgreSQL, and serves device health, room occupancy and deduplicated fall alarms from them.
+A Go HTTP service for room-sensor events. It journals events and fall alarms in PostgreSQL 16, serves device health and room occupancy, and exposes a resumable alarm feed.
 
-This is my solution to [Teton's real-time streaming backend challenge](https://github.com/Teton-ai/careers-challenge-streaming-backend). The problem statement, event schema, event generator and evaluator all live in their repository and are not copied here.
+This is my solution to [Teton's real-time streaming backend challenge](https://github.com/Teton-ai/careers-challenge-streaming-backend). The challenge repository contains the problem statement, event schema, generator, and evaluator.
 
-## Status
+This project was co-created with AI coding assistants: Claude wrote most of the code under my direction, and Codex was used for independent review and hardening. I set the direction, made the design decisions put to me, and ran the tests and load measurements on my own machine.
 
-Work in progress.
+## Design
 
-| Area | State |
-|---|---|
-| Durable ingestion (`POST /events`) | Done |
-| Idempotent retries and conflict detection | Done |
-| Validation of all six event types, hostile input rejected | Done |
-| Bounded queue with one batching writer | Done |
-| Device health over 5 minutes (`GET /devices/{id}/health`) | Done |
-| Room occupancy over 1m, 5m, 1h (`GET /rooms/{id}/occupancy`) | Done |
-| Deduplicated fall alarms (`GET /alarms?since=`) | Done |
-| Resumable long-poll alarm feed (`GET /alarms?after_id=&wait=`) | Done |
-| Fall warnings prioritised under load | Done |
-| Clock-skew correction for device health | Done |
-| Metrics (`GET /metrics`) and readiness (`GET /readyz`) | Done |
-| Load measurements | In progress |
+`POST /events` validates input and writes to bounded ingestion lanes. The service responds successfully only after commit. Exact retries are acknowledged as duplicates; reuse of an identity with different content returns `409`. If a queue stays full, the service returns `503` with `Retry-After`. Fall warnings have a dedicated lane, though database contention can still delay them.
 
-## How ingestion works
+Health and occupancy are calculated from the journal at read time using event timestamps, so late and replayed events update historical results. Alarm snapshots are timestamp ordered; the live feed follows durable commit order and resumes with a persistent cursor. See [NOTES.md](NOTES.md) for verified behavior, measurements, and limits, and [docs/retention-design.md](docs/retention-design.md) for the retention proposal.
 
-1. `POST /events` validates the envelope, the type-specific field and the timestamp. An event dated more than one hour ahead is rejected.
-2. Valid events go into bounded queues, one per ordinary writer, chosen by device so ordinary events retain lane enqueue order. Each writer takes whatever is waiting, up to a batch limit, and commits it as one atomic statement.
-3. The request is answered only after its batch commits, so a `200` means the event is on disk.
-4. `(device_id, seq, ts)` identifies an event. Sending the same event again returns `200` with `"duplicate": true` and changes nothing. Reusing the identity with different content returns `409`.
-5. If the queue stays full, the request gets `503` with `Retry-After`. Retrying is always safe.
-6. Fall warnings have a dedicated queue and writer, so ordinary events cannot consume their queue capacity. Database contention and queued falls can still delay an alarm.
+## Run
 
-Confidence and magnitude must be mathematically within 0..1. This build corrects the previous float-rounding acceptance of values just above 1; retries of those previously accepted, out-of-schema payloads now receive `400`. Valid event retries retain their existing semantics.
-
-## How the reads work
-
-Health and occupancy are computed at read time from the journal, by the device's own event time, so a late or replayed event corrects the past without any extra step.
-
-- **Health:** the share of the last 300 one-second slots that contain a heartbeat. Clock calibration uses the most recently received sample within 60 seconds of receipt, with zero offset when none qualifies. Older replay and large future outliers cannot move the window. Delay within that bound remains indistinguishable from clock error, so this is a coverage estimate.
-- **Occupancy:** occupied time integrated from presence transitions and clipped to the window. Time before a room's first known state is reported as `unknown_seconds`, not counted as empty.
+Requirements: Go 1.26.11+ and Docker. Start PostgreSQL, create a local `.env`, then run the server:
 
 ```bash
-curl localhost:8080/devices/dev_0001/health
-curl "localhost:8080/rooms/room_001/occupancy?window=5m"
-```
-
-## How alarms work
-
-A sensor can report one fall several times. Reports with the same device, room, timestamp and confidence become one alarm, created in the same transaction as the event, so an acknowledged fall always has its alarm.
-
-- `GET /alarms?since=0` returns all alarms ordered by event time. `since` filters by receipt time. Use `after_id` for reliable resume across concurrent commits.
-- `GET /alarms?after_id=<cursor>&wait=10` is the live feed. It answers as soon as a new alarm commits, or with an empty list after the wait. Pass the returned `next_cursor` as `after_id` next time. The cursor survives disconnects and restarts, and a fall that arrives late is still delivered.
-
-The live feed follows durable commit order and retains each event's original timestamp. Arbitrarily late events cannot be emitted in strict chronological order while also delivering new falls within one second; timestamp-ordered history is available from the snapshot. This ordering tradeoff is explicit.
-
-Public `event_id` values are persisted. Migration 006 preserves identifiers already published by older builds; new alarms receive unique identifiers even after a device sequence resets. Previously colliding legacy identifiers remain unchanged. `alarm_id` is the stable database cursor for consumer deduplication.
-
-Run one service instance. Stop the old instance before starting an upgraded build and its migrations. Mixed-version rolling deployment is unsupported because older builds derive different identifiers for newly created alarms.
-
-## Operating it
-
-- `GET /healthz`: the process is up.
-- `GET /readyz`: the database answers.
-- `GET /metrics`: Prometheus text. Useful first looks are `teton_ingest_queue_depth`, `teton_events_received_total` by outcome, and `teton_alarm_visible_latency_seconds`.
-
-## Stack
-
-Go (standard `net/http`, `pgx`) and PostgreSQL 16. One service, one database.
-
-## Run it
-
-Needs Go 1.26.11+ and Docker. The Compose service is exposed on localhost for trusted local evaluation. External deployment needs an authenticated, encrypted access boundary and a deployment-specific access policy.
-
-```bash
-docker compose up -d db
-cp .env.example .env && set -a && source .env && set +a
+docker compose -p teton-streaming up -d db
+cp .env.example .env
+set -a && source .env && set +a
 go run ./cmd/server
 ```
 
-Send an event:
+The shell environment setup exports `DATABASE_URL` for the host process. Compose does not export container environment variables into your host shell. Keep the `.env` file local.
+
+The Compose server is exposed on localhost for trusted local evaluation. External deployment needs an authenticated, encrypted access boundary and a deployment-specific access policy.
+
+## Tests
+
+Integration tests require PostgreSQL. They create and remove a random schema, reusing it across restarts within each test; the database account needs schema-creation permission. Other schemas are preserved. Use a dedicated test database/schema.
+
+In a second Bash shell, export the local settings before running tests:
 
 ```bash
-curl -d '{"device_id":"dev_0001","room_id":"room_001","type":"heartbeat","ts":"'"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"'","seq":1}' localhost:8080/events
-```
-
-## Test it
-
-The integration tests need the database running:
-
-Each test creates and removes its own random schema and reuses it across same-test restarts. The supplied database account needs schema-creation permission. Application tables in other schemas are preserved.
-
-```bash
+set -a && source .env && set +a
 go test -race -count=1 -p 1 ./...
 ```
 
-To drive it with Teton's generator, clone their repository and run this from inside it. Use a fresh database per run, because the generator restarts its sequence numbers each time. Offline mode needs at least 95 seconds for devices to reconnect and replay.
+## Run the official generator
+
+With the service running, clone the official harness alongside this checkout and run its smoke evaluator:
 
 ```bash
-python3 event_generator/generate.py --mode adversarial --target http://localhost:8080 --devices 200 --duration 100
+git clone https://github.com/Teton-ai/careers-challenge-streaming-backend.git ../teton-challenge
+python3 ../teton-challenge/eval/check.py --target http://localhost:8080 --devices 50 --duration 30 smoke
 ```
 
-## Measure it
+The evaluator also accepts `baseline`, `burst`, `offline`, and `adversarial`. Use at least 100 seconds for offline replay and 125 seconds to include both complete burst windows. Run each mode against a fresh dedicated test database: `since=0` includes all alarms, and reusing history contaminates the evaluator's distinct-fall count. The public evaluator checks a narrower set of properties than the private grader.
 
-`tools/load` offers events at a set rate from many connections, follows the alarm feed, and reports throughput, latency and whether any acknowledged alarm was missing. A short diagnostic uses a 5,000/s baseline with one 30-second burst at 50,000/s:
+## Load measurements
+
+A diagnostic run with a 5,000/s baseline and a 30-second 50,000/s burst:
 
 ```bash
 go run ./tools/load -senders 1000 -duration 60s -rate 5000 -burst-rate 50000 -burst-start 15s -burst-duration 30s
 ```
 
-On Docker Desktop for Windows, run it inside Docker's network, because the Windows port proxy roughly halves throughput:
+On Docker Desktop for Windows, running the load process inside the Compose network avoids the Windows port proxy:
 
 ```bash
-docker run --rm --network teton-streaming_default -v "${PWD}:/src" -w /src golang:1.26.11 go run ./tools/load -target http://server:8080 -senders 2000 -duration 60s -rate 5000 -burst-rate 50000 -burst-start 15s -burst-duration 30s
+docker run --rm --network teton-streaming_default -v "${PWD}:/src" -w /src golang:1.26.11 go run ./tools/load -target http://server:8080 -senders 2000 -duration 60s -rate 5000 -burst-rate 50000 -burst-start 15s -burst-duration 30s -offer-buffer 16384
 ```
 
-Leave out `-rate` to send as fast as the service answers. Results so far are in `NOTES.md`.
+Results are environment-specific: the 9-reported-CPU Linux closed-loop run reached 58,477 events/s, and a full scenario accepted two complete 50,000/s cohorts. The owner-reported run on my 4-CPU Docker VM reached about 13,200/s in its burst ([record](docs/benchmarks/windows-docker-reported.json)). See [NOTES.md](NOTES.md) and [docs/benchmarks](docs/benchmarks) for conditions and accounting. These are local measurements, not a grader score or certification.
 
-Default load runs report diagnostic measurements. Add `-require-full-offer -require-no-loss` to fail when scheduled events were unsent or acknowledged falls were missing. Optional `-min-accepted-rate` and `-max-request-p95-ms` check aggregate thresholds; `-max-fall-p95-ms` checks the aggregate and each configured burst. Request percentiles cover response attempts, while fall percentiles cover first send to feed observation.
+For the five-minute schedule, `tools/load` generates traffic but does not restart the service or independently inspect the database. Perform the hard kill/restart through the process manager and reconcile the journal separately. Do not use `docker compose down -v` against a database containing data you need.
 
-The expanded tool also reports each burst separately, actual request starts and acknowledgements inside each phase, and schedule-to-send/ACK/feed delay. `-require-all-accepted` requires an acknowledgement for every sent event. `-offer-buffer` explicitly sizes the bounded queue of scheduled arrivals; its default remains the sender count. Tail starts and completions remain visible. `-strict-offer-window` expires requests that would start after the offer window instead of draining them.
+## Endpoints
 
-For the five-minute traffic schedule, including two bursts and a 60-second outage affecting 20% of devices:
+- `GET /healthz`: process is up.
+- `GET /readyz`: database responds.
+- `GET /metrics`: Prometheus text metrics.
+- `GET /devices/{id}/health`
+- `GET /rooms/{id}/occupancy?window=5m`
+- `GET /alarms?since=0` or `GET /alarms?after_id=<cursor>&wait=10`
 
-```bash
-go run ./tools/load -senders 2000 -devices 5000 -duration 5m -rate 5000 -burst-rate 50000 -burst-start 30s -burst-duration 30s -second-burst-start 210s -offline-start 90s -offline-duration 60s -offline-percent 20 -offline-buffer-capacity 1000 -offer-buffer 16384 -retries 10 -require-full-offer -require-all-accepted -require-no-loss -max-fall-p95-ms 1000 -json load-results.json
-```
-
-Offline mode assigns devices to scheduled arrivals independently of worker speed and replays the original payloads with their original timestamps and identities. Buffered, replayed, overflowed and unflushed events are counted explicitly. This command generates traffic; it does not restart the service or independently inspect the database. Hard-kill and restart the service at 180 seconds through the process manager, and reconcile the final journal separately. On Docker Compose the service commands are `docker compose kill -s SIGKILL server` and `docker compose up -d server`.
-
-The explicit 16,384-slot queue represents at most 327.68 ms of nominal 50K/s arrivals. It accommodates measured generator scheduling pauses; inspect schedule-to-feed latency as well as POST-to-feed latency. A completed scheduled cohort does not mean every acknowledgement arrived before the phase ended. Retention remains a [design proposal](docs/retention-design.md).
-
-## Layout
-
-| Path | Content |
-|---|---|
-| `cmd/server/` | Process entry point and configuration |
-| `internal/api/` | HTTP handlers and validation |
-| `internal/ingest/` | Bounded queue and batching writer |
-| `internal/aggregation/` | Pure window calculations |
-| `internal/metrics/` | Metric types and Prometheus text output |
-| `internal/store/` | PostgreSQL journal and migrations runner |
-| `migrations/` | Versioned schema |
-| `tools/load/` | Load-measurement tool |
-| `tests/integration/` | Restart, replay, concurrency, conflict, fixed-clock read and alarm feed tests |
-| `NOTES.md` | Design decisions and what has been verified |
+Run one service instance. Mixed-version rolling deployment is unsupported; stop the old instance before starting an upgraded build and migrations.

@@ -1,239 +1,78 @@
-# Implementation notes
+# Design and verification notes
 
-Upstream commit: `ade2e2cba2d6157f9d1bec7e4821ea54026473d3`
+This file records the current design and the evidence behind the reported behavior. The challenge specification and generator are in [Teton's official repository](https://github.com/Teton-ai/careers-challenge-streaming-backend).
 
-## Phase 1: first durable path (done 15 Nov 2026)
+## Current design
 
-- `POST /events` validates the envelope, journals to `event_log`, and returns 200 only after commit.
-- Exact retry of `(device_id, seq)` with the same canonical payload: 200, `"duplicate": true`, no new row.
-- Same identity with different content: 409, logged.
-- `ts` more than 1 hour ahead of receipt: 400. Exactly 1 hour ahead: accepted.
-- Canonical payload = the JSON object re-encoded with sorted keys, numbers kept as sent. Hash is sha256 of that.
+- **Durable ingestion:** `POST /events` validates the envelope and type-specific values before enqueueing. Bounded ordinary lanes batch journal writes; a dedicated fall lane protects warnings from ordinary queue saturation. The service replies successfully only after commit. Queue saturation returns `503` with `Retry-After`; storage failures return retryable `503`.
+- **Identity and retries:** `(device_id, seq, ts)` identifies an event. An identical retry is a duplicate; different content under the same identity is a conflict. Alarm creation is transactional with the event. An advisory transaction fence prevents an interrupted alarm commit from being overtaken by a later cursor.
+- **Reads:** Health and occupancy are computed from journal rows at read time and use event time. Late and replayed events therefore correct historical windows. Occupancy before the first known presence state is unknown, not empty.
+- **Alarms:** Timestamp-ordered snapshots support history; the live feed follows commit order and resumes with a durable cursor. Strict event-time ordering for arbitrarily late events is not compatible with prompt live delivery.
+- **Deployment:** The supported model is a single service instance with coordinated upgrades. The journal currently grows without bound; retention is design-only.
 
-Verified:
+## Verification
 
-- Integration tests pass against PostgreSQL 16.
-- Real binary: post, `kill -9`, restart, row still present, replay adds nothing, changed payload gives 409.
+The final source state has passed `go test -race -count=1 -p 1 ./...`, vet, and a pooled-DSN preservation check. The full test suite includes integration coverage for retries, identity conflicts, concurrent submissions, replay, read calculations, alarm feed resume, and interrupted commits. The generator and load runs below are separate from the test suite.
 
-Docker: `docker compose up --build` verified on Windows with Docker Desktop (15 Nov 2026): event accepted, server restarted, replay reported as duplicate.
+The public evaluator checks distinct-fall counts and samples read endpoints. Its exit status alone is not a correctness verdict; compare the printed ground-truth count with the returned alarms. It is narrower than the private grader.
 
-## Phase 2: journal and validation (done 15 Nov 2026)
+### Public evaluator and failure probes
 
-- Each event type's own field is validated (boolean, 0 to 1 range, enum, number). Bad input is a 400. See the hardening section for inputs that used to slip through.
-- Requests go into a bounded queue. One writer takes whatever is waiting, up to `INGEST_BATCH_SIZE`, and commits it as one transaction. Batches grow by themselves under load; there is no flush timer.
-- One writer means journal id order equals commit order. (Phase 6 replaced this with one lane per device group plus a dedicated lane for falls; see below.)
-- If the queue stays full for `INGEST_ENQUEUE_TIMEOUT_MS`, the request gets 503 with `Retry-After`. Storage failure is also 503. Both are safe to retry.
-- Inside a batch, the first event for an identity wins; later copies are duplicates, later different content is a conflict.
+All five public evaluator modes passed on the final code using 50 devices and a fresh database per mode:
 
-Verified:
+| Mode | Duration | HTTP accepted | Distinct falls / alarms |
+|---|---:|---:|---:|
+| smoke | 30 s | 1,460 | 15 / 15 |
+| baseline | 60 s | 2,986 | 38 / 38 |
+| burst | 180 s | 15,895 | 202 / 202 |
+| offline | 120 s | 5,176 | 69 / 69 |
+| adversarial | 240 s | 18,285 | 242 / 242 |
 
-- `go test -race -count=5 ./...` passes.
-- 50 simultaneous copies of one event: one row, exactly one reported as the original.
-- 20 simultaneous events with one identity and different content: one accepted, 19 conflicts.
-- Reply dropped after commit, then retry: 200 duplicate, one row.
-- Upstream generator, adversarial mode, 200 devices, 20 s: 6,273 sent, 0 failed, 6,273 distinct rows.
+There were no HTTP failures. A separate 30-second API-kill/restart probe acknowledged all 5,400 scheduled events, replayed all 120 offline-buffered events, and delivered all 67 acknowledged falls. An intentionally throttled overload probe produced 533 retryable `503` attempts with `Retry-After`; all 32 events eventually committed exactly once, and a post-acknowledgement retry was recognised as a duplicate.
 
-## Phase 3: device health and room occupancy (done 15 Nov 2026)
+These are functional checks, not capacity proof. [The verification record](docs/verification/public-evaluator.json) includes source hashes, the official harness revision, counts, isolation and scope.
 
-- Both are computed at read time straight from `event_log`, using two partial indexes. There are no derived tables for them, so a read always reflects every committed event and a late event corrects history without extra work.
-- All calculations use the device's event time (`ts`). Events dated ahead of the server clock are stored and only start to count once the clock reaches them.
-- Health: `availability_5m` is the number of distinct one-second slots holding a heartbeat in `(now - 300s, now]`, divided by 300. Slots are counted back from now, so there are exactly 300. Several heartbeats in one slot count once.
-- Occupancy: occupied time is integrated from presence transitions, clipped to the window. The state at the window start comes from the last transition at or before it.
-- Ordering inside a room is `ts`, then `device_id`, then `seq`. This makes ties reproducible; it does not claim to know which device was really first.
-- No earlier history means unknown, not absent. Unknown time is reported in `unknown_seconds` and never counted as occupied, so `occupied_pct` is a lower bound when it is above zero.
-- A device or room never seen returns zeros, not 404, so new devices work without registration.
+### Linux capacity and scenario runs
 
-Verified:
+The server, PostgreSQL 16.2, and load process shared a Linux environment where Go reported 9 CPUs. Durability settings stayed enabled. This is not directly comparable with my 4-CPU Docker VM.
 
-- Occupancy fixture: absent at 12:00:00, present at :10, absent at :40 gives 30/60 at 12:01:00. Adding a late present at :50 gives 40/60.
-- Same events in order, reversed and interleaved give identical results.
-- Two devices in one room, including an equal-timestamp tie, follow the documented rule.
-- Health edges: a heartbeat exactly 300 s old is excluded, one at the current instant is included, two in one second count once, 300 consecutive seconds give 1.0.
-- Teton's smoke evaluator, 50 devices: 1,464 sent, 0 failed, both read endpoints answer.
-- Both read queries use the partial indexes (checked with EXPLAIN on a small table).
+| Run | Verified result |
+|---|---|
+| 30-second closed-loop capacity | 1,755,375 accepted; 58,477/s; 23,162/23,162 acknowledged falls delivered; POST-to-feed p95 28.714 ms |
+| Five-minute scenario, first 50K/s burst | 1,500,000 scheduled, sent, and accepted; all 19,826 acknowledged falls delivered |
+| Five-minute scenario, second 50K/s burst | 1,500,000 scheduled, sent, and accepted; all 19,746 acknowledged falls delivered |
+| Complete five-minute scenario | 4,200,000 events scheduled and sent; 4,199,967 fresh acceptances plus 33 duplicate acknowledgements; journal count 4,200,000; all 60,000 events buffered during offline periods replayed |
 
-## Phase 4: fall alarms and resumable feed (done 15 Nov 2026)
+The five-minute run hard-killed the API at 180.442 seconds; readiness returned at 180.772 seconds. There were no final HTTP or transport errors, unsent events, or unflushed offline events. All 61 live read checks passed shape/range checks, not comparison against an independent aggregation oracle. Counts persisted after the API stopped. The database was not killed, so this does not test database failure or backup restoration.
 
-- One logical fall = one row in `alarms`, keyed by device, room, event time and confidence. Jitter copies carry new sequence numbers but the same four values, so they collapse. All copies stay in the journal.
-- The alarm is created in the same transaction as its event, by the single journal writer. There is no separate worker or checkpoint: an acknowledged fall always has its alarm, and a crash can never leave one without the other.
-- `alarms.id` is the feed cursor. Because one writer commits batches one at a time, ids become visible in increasing order, so a consumer at cursor N cannot miss a later alarm.
-- `GET /alarms?since=<ts>` is a snapshot ordered by event time. `since` is unix seconds or a timestamp.
-- `GET /alarms?after_id=<cursor>&wait=<seconds>` is the feed, in commit order, long-polling up to 30 s. The writer wakes waiting consumers when a batch commits a new alarm.
-- Consumers may see an alarm twice if they disconnect before saving the cursor; `alarm_id` makes that harmless.
+The load schedule used an explicit 16,384-slot offer buffer (327.68 ms at 50,000/s) because the default bounded scheduler dropped work during pauses even against an immediate-response endpoint. Earlier paced diagnostics did not send their full schedules and were not target passes. The final full scenario did send and acknowledge its entire schedule. Do not treat unsent scheduled work as service refusals.
 
-Known limits, chosen on purpose:
+Raw summaries: [closed-loop capacity](docs/benchmarks/closed-loop-30s.json) and [full scenario](docs/benchmarks/full-scenario.json). They include phase accounting and latency measurements.
 
-- The brief asks for the feed "in order per room". The feed is in commit order, which equals event order per room except when a fall arrives late. A late fall is delivered as soon as it commits, with its original `ts`, instead of being held back or dropped. Sub-second delivery, hour-late arrivals and strict event order cannot all hold at once.
-- Two real falls from one device with the same millisecond timestamp and the same confidence would merge. Falls a few seconds apart with different timestamps stay separate; merging those would need a time-window heuristic the brief does not define.
+### Four-CPU Docker VM result
 
-Verified:
+The corrected-listener 60-second run on my 4-CPU Docker VM scheduled 1,650,000 events ([owner-reported record](docs/benchmarks/windows-docker-reported.json)). It accepted 547,327 (9,121/s over the whole run, about 13,200/s during the burst); 1,102,673 scheduled events were never sent because no load sender was available. There were no HTTP or transport errors, and all 7,165 acknowledged falls reached the feed. Request p95 was 126 ms; first-send-to-feed p95 was 67 ms. This run did not reach the 50,000/s burst target.
 
-- Three jitter copies plus an exact retry: 3 journaled events, 1 alarm. 30 simultaneous copies: 1 alarm.
-- Falls differing in time, device or confidence: separate alarms.
-- Cursor saved, service restarted, new falls sent including one with an older event time and a jitter copy: resume returns exactly the two new alarms, in commit order.
-- Long poll answers within a second of a fall being sent; an empty wait returns after the wait.
-- Teton's generator, adversarial mode, 300 devices, service hard-killed and restarted mid-run: 22,606 acknowledged, 22,606 journaled, 289 distinct falls among them, 289 alarms. The generator does not retry, so the 272 requests it sent while the service was down are not in the journal.
+Older Windows port-proxy and shared-listener latency results are superseded by the corrected-listener run above. The two environments use different hardware, runtime topology, and workloads; compare them only with those conditions attached.
 
-## Hardening after an independent test and review (15 Nov 2026)
+## Limits and next work
 
-The service was attacked with hostile input and reviewed against the brief. Defects found and fixed:
+Retention should use time-based partitions and a cleanup policy that preserves sufficient history for window calculations. Define and test the retained-state boundary before deletion. Other explicit limits are the single-instance cursor/wakeup model, clock-skew estimates based on recent received heartbeats, and event-time versus live commit-order alarm semantics. No private evaluator score or certification is reported.
 
-- **Poison events.** Values PostgreSQL refuses (NUL characters, numbers beyond float range or with huge literals, ids too long for an index) passed validation, failed the batch insert, and turned every valid event in that batch into a 503. Measured before the fix: 60 poison events caused 400 valid events to be refused. Now they are rejected as 400 before queueing. As a backstop, when PostgreSQL refuses a batch over its data, the writer commits each event alone, so only the bad one fails. After the fix: 4,740 of 4,740 valid events accepted alongside 60 poison events.
-- **Alarm reads broken by one fall.** A confidence of `1e-400` parsed to zero, passed the range check, and then failed conversion on every alarm read, including after restart. Underflowing numbers are now rejected, and confidence is stored as a float so a read cannot fail on it.
-- **Query parameters.** `NaN`, infinities and out-of-range values for `since` and `wait` are rejected.
-- **Request body.** Data after the JSON object is rejected.
-- **Server.** Read, write and idle timeouts are set. The database port is bound to localhost and the container runs as a non-root user.
-- **Alarm shape.** `event_id` added, as documented by Teton's evaluator.
+## Local commands
 
-Rough throughput measured by the independent tester on a 2 vCPU machine, with server, database and load tool sharing it: about 14,000 events/s at 1,000 concurrent senders, alarm delivery p95 130 ms, no refusals. That machine cannot say whether 50,000/s is reachable.
-
-## Phase 5: priority, clock skew, overload and observability (done 15 Nov 2026)
-
-- **Fall priority.** Fall warnings have their own queue. Every batch takes all waiting falls first and then fills up with other events, so a fall waits for at most the batch already being committed. A full normal queue cannot cause a fall to be refused.
-- **Stalled database.** A batch that takes longer than `INGEST_COMMIT_TIMEOUT_MS` fails with a retryable 503 and the writer moves on, instead of blocking every sender behind it.
-- **Clock skew in health.** The schema allows device clocks to be 30 s or more off. Health is now measured on the device's own clock: the offset is the latest heartbeat's timestamp minus the time it was received, and the 300 s window ends at server time plus that offset. A healthy device scores 1.0 whether its clock is right, behind or ahead. A device that stops keeps its last offset, so its availability falls as real time passes. The response includes `clock_offset_seconds`.
-- **Clock skew in occupancy.** `in_room` follows the latest presence event even when it is dated ahead of the server clock ("latest presence event wins"). Such an event adds no occupied time until the server clock reaches its timestamp. Occupancy windows are not corrected per device; with 30 s of skew a transition can be placed up to 30 s off.
-- **Identity.** An event is identified by `(device_id, seq, ts)`. A device or generator that restarts its sequence numbers produces new events, not conflicts. A true retry carries the same timestamp, so retries are still recognised. Same identity with different content is still a 409.
-- **Alarm snapshot.** `since` filters by when the service received the fall, so a poller passing its last poll time also gets falls that arrived late. Results stay ordered by event time.
-- **Observability.** `GET /metrics` serves Prometheus text: events by outcome and by type, queue depth for both queues, batch size, commit time, queue wait, request time, alarms created, time from receiving a fall to its alarm being committed, batches split over refused data, waiting feed consumers, reads by endpoint and read errors. `GET /readyz` checks that the database answers; `GET /healthz` only says the process is up.
-
-Verified:
-
-- 12 heartbeats queued, then 2 falls, batches of 5: both falls are in the first batch.
-- Normal queue full: a heartbeat is refused as overloaded, a fall sent at the same moment is accepted.
-- Stalled database: each submit fails after about the commit timeout and the writer keeps serving.
-- A device sending once a second for 5 minutes scores 1.0 with its clock exact, 30 s behind and 30 s ahead, with the offset reported as 0, -30 and +30.
-- A device 30 s behind that stopped 2 minutes ago scores 0.6.
-- Same device and sequence number with a new timestamp: accepted as a new event.
-- A fall that happened before the poller's last poll but arrived after it is returned.
-
-Chosen limits:
-
-- A single heartbeat with a wildly wrong timestamp (up to the one hour allowed) moves that device's estimated clock until a later heartbeat replaces it.
-- Single instance only: the alarm wake-up signal and the commit ordering live in the process.
-- The journal grows without bound. Reads need about an hour of it; time-based partitions with a drop job are the intended fix.
-
-## Phase 6: load measurement (method ready, target hardware run pending)
-
-`tools/load` is the measuring tool. Teton's generator sends one request at a time and waits for each reply, so it cannot offer anything near 50,000 events/s; it reached 300 to 700 requests/s here. The tool instead:
-
-- sends from many keep-alive connections, with Teton's event mix over 5,000 devices and a fresh device prefix per run;
-- with `-rate`, offers events on a fixed schedule whether or not the service keeps up. An event no sender is free to take is counted as not sent, so a slow service cannot quietly lower the offered rate;
-- follows the alarm feed and times every fall from just before its POST to its arrival on the feed;
-- counts every outcome and checks that offered = accepted + duplicate + rejected + failed + not sent.
-
-Results on a 2 vCPU sandbox, with the service, PostgreSQL and the load tool sharing the two cores. Throughput on this machine swings between about 4,000 and 11,000 events/s from one five-second interval to the next, so these show behaviour, not capacity:
-
-| Run | Offered | Accepted | Refused | Request p95 | Fall to feed p95 | Falls missing |
-|---|---|---|---|---|---|---|
-| Unpaced, 256 senders, 15 s | 119,086 | 119,086 (7,934/s) | 0 | 71 ms | 75 ms | 0 of 1,574 |
-| 3,000/s with an 8 s burst at 30,000/s, 1,000 senders, 20 s | 276,000 | 138,163 (6,906/s) | 0 | 120 ms | 128 ms | 0 of 1,795 |
-
-In the second run the tool scheduled substantially more events than it sent. The 137,837 unsent events never reached the service because the tool had no free sender. No sent request was refused and no acknowledged alarm was missing in the observation window. In both runs the journal row count equals the accepted count. This does not establish service behavior at the full scheduled arrival rate.
-
-### On an 8-core Windows PC with Docker Desktop (15 Nov 2026)
-
-Challenge shape: 5,000/s baseline with a 30 s burst at 50,000/s, 1,000 senders, 60 s. Service and PostgreSQL run in Docker's Linux VM (4 CPUs).
-
-| Where the load tool ran | Accepted | Refused | Request p95 | Fall to feed p95 | Falls missing |
-|---|---|---|---|---|---|
-| On Windows, through Docker's port proxy | 262,650 (4,376/s average) | 0 | 379 ms | 511 ms | 0 of 3,451 |
-| In a container on Docker's network | 496,413 (8,272/s average, about 11,500/s during the burst) | 0 | 114 ms | 119 ms | 0 of 6,423 |
-
-Findings from these runs:
-
-- Docker Desktop's Windows port proxy roughly halves throughput. Measure from inside Docker's network.
-- The service's own metrics showed where the time went: 1,393 batches averaging 189 events took 44 ms each, and the single writer was busy for the whole run. Requests spent their time waiting for that writer, not in HTTP handling.
-- The burst target was not met: about 11,500/s against 50,000/s. No sent request was refused and no acknowledged alarm was missing. The reported alarm times include the load tool's original shared connection pool; confirm them using the corrected listener before making an alarm-latency claim.
-
-### What was changed because of it
-
-- **One statement per batch.** A batch used four round trips: begin, insert, read back every row to see which were new, commit. The insert now returns the identities it inserted, in a single atomic statement, and the stored hash is only looked up for events that were already journaled (retries). On the sandbox, the same load went from 9,800/s to 14,900/s.
-- **Parallel writers.** Ordinary events are spread over `INGEST_WRITERS` lanes by device, so PostgreSQL can work on several batches at once. Ordinary events retain lane enqueue order; concurrent requests and the separate fall lane do not establish global per-device event-time order. Fall warnings keep a lane and a writer of their own. That writer is the only one that creates alarms, which keeps alarm ids becoming visible in increasing order for the feed cursor in the supported single-instance deployment. The 2-core sandbox showed no throughput gain; the PC rerun below also showed no gain.
-
-### Rerun on the PC after those changes
-
-| Run | Accepted | Refused | Request p95 | Fall to feed p50 / p95 | Falls missing |
-|---|---|---|---|---|---|
-| In Docker's network, 2,000 senders | 484,727 (8,078/s average, about 11,200/s during the burst) | 0 | 338 ms | 67 ms / 280 ms | 0 of 6,446 |
-
-Throughput did not move after adding writer lanes. This suggests another shared resource limits this setup, but does not isolate the bottleneck. The service's metrics for the run:
-
-- 53,369 batches averaging 9 events, 4.75 ms each. The database was being handed many tiny batches.
-- A request took 82 ms on average inside the service, of which 24 ms was waiting in a queue and 5 ms was the commit. The remaining 53 ms was not attributed by these measurements. CPU contention is plausible because the VM's four CPUs are shared by PostgreSQL, the service and a load tool holding 2,000 connections; profiling is needed to establish that explanation.
-- Falls reached the feed faster than ordinary requests completed (67 ms against 119 ms at the median), which is the dedicated fall writer doing its job.
-
-One more change followed from the tiny batches: ordinary lanes now wait up to `INGEST_LINGER_MS` (5 ms) for a batch to fill, because a commit costs one statement and one disk flush whatever its size. On the sandbox this cut total database commit time for the same load by 30% (91 s to 64 s) with unchanged throughput, since the CPU is the limit there too. The fall lane never lingers.
-
-### Service and load tool run directly on Windows, database still in Docker
-
-Tried to check whether the crowded VM was the limit. It was not a cleaner test:
-
-| Run | Accepted | Transport errors | Request p95 (client) | Request average (inside the service) |
-|---|---|---|---|---|
-| Native Windows, 2,000 senders | 382,148 (6,368/s average) | 728 | 495 ms | 42 ms |
-
-- Throughput went down, not up. Each batch commit now crossed Docker's port proxy to reach the database and took 11.7 ms on average, against 4.75 ms when the service sat next to it.
-- The service answered in 42 ms on average while the client saw 158 ms at the median and some 15 s timeouts. That gap is on the Windows side of the connection, between the load tool and the service, most likely 2,000 connections being opened at once against the listener's backlog.
-- This run also exposed a fault in the load tool: its feed consumer shared the senders' connection pool, so under load it queued for a connection and reported its own waiting as alarm latency (13 s at p95 in this run). The consumer now has its own connection. Alarm latency figures from the earlier in-Docker runs were taken with spare connections and agree with the request latencies there, but the next run should confirm them.
-
-So this run does not show what the service can do on eight cores. The best measured figure remains the in-Docker one.
-
-### Where this leaves the burst target
-
-Best measured burst rate on an 8-core Windows PC, everything inside Docker Desktop's 4-CPU VM including the load generator: about 11,000 events/s, against a 50,000 events/s target. Scheduled work that the generator did not send is not service overload. No sent request was refused, every acknowledged event was journaled, and no acknowledged alarm was missing in these runs. Earlier 119 to 280 ms alarm p95 figures need confirmation with the separate listener connection pool. Shared CPU and the one-request-per-event workload are possible constraints; the service's independent ceiling has not been established. A fairer test uses a separate load-generator machine.
-
-### Confirming run on the PC with the hardened build and corrected listener (15 Nov 2026)
-
-Same shape and setup as the earlier in-Docker runs: 5,000/s baseline with a 30 s burst at 50,000/s, 1,000 senders, everything inside Docker Desktop's 4-CPU VM.
-
-| Scheduled | Accepted | Never sent | HTTP or transport errors | Request p50 / p95 | Fall first-send-to-feed p50 / p95 / max | Acknowledged falls on feed |
-|---|---|---|---|---|---|---|
-| 1,650,000 | 547,327 (9,121/s average, about 13,200/s during the burst) | 1,102,673 | 0 | 58 ms / 126 ms | 22 ms / 67 ms / 246 ms | 7,165 of 7,165, none duplicated |
-
-This is the first alarm-latency figure on this machine taken with the listener on its own connection, so it replaces the earlier 119 to 280 ms figures. Falls reached the feed in well under half the time an ordinary request took to complete. The run was diagnostic: no pass or fail thresholds were requested, and the percentiles cover the whole run, not the burst alone. The 50,000/s target remains unmet on this setup.
-
-### Independent candidate confirmation (15 Nov 2026)
-
-A local hardening candidate based on `fe1a52c9e25344446938facc8c65efedb16dd681` preserves the separate feed-client pool, four ordinary writer lanes, the dedicated fall lane, and 5 ms ordinary linger. Server, PostgreSQL 16.2 and the load tool shared a Linux environment whose Go runtime reported nine CPUs; this is not a controlled comparison with the Windows PC.
-
-In a separate 30-second target phase with 2,000 senders and 5,000 devices, the tool scheduled 1,500,000 events at 50,000/s. It sent and received acceptance for 1,371,706; 128,294 were never sent. Observed accepted throughput was 45,637/s over 30.057 seconds. No sent request returned an HTTP error or a transport error. All 17,739 acknowledged falls appeared on the feed, with no duplicate observations; first-send-to-feed p95 was 33.531 ms. Request-attempt p95 was 74.042 ms.
-
-Database row deltas matched both accepted events and accepted falls and remained unchanged after a hard API-process kill. The database itself was not killed. This is not a disk-failure or backup/restore test.
-
-The explicit full-offer validation failed and the load CLI exited nonzero. The 50,000/s target remains unmet. This isolated target phase does not replace the complete baseline, repeated bursts, offline replay and recovery scenario.
-
-## Capacity and interrupted-commit validation (15–16 Nov 2026)
-
-The next independent pass reproduced a recovery failure beyond the earlier tests: an API timeout or SIGKILL could leave an old PostgreSQL transaction pending after allocating alarm ID 1. Its replacement could commit ID 2 first; a consumer saving cursor 2 would then miss ID 1 when it eventually committed. Fall/mixed batches now take a PostgreSQL transaction advisory fence before any alarm ID allocation. Both the suppressed-cancel timeout and direct SIGKILL/restart reproductions verify that the replacement waits and the feed delivers IDs 1 then 2. Ordinary batches use a smaller statement without the alarm CTE.
-
-The long-run reader also exposed fractional-duration accumulation returning `known_seconds=60.00000000000023` and negative unknown time. Occupancy now sums exact durations and converts to seconds once; a dense-transition regression covers this. The first failed long run remains recorded in the review evidence. Mathematical values just above 1 are now rejected for confidence/magnitude instead of passing through float rounding.
-
-The server, PostgreSQL and generator shared a Linux environment reporting nine CPUs, Go 1.26.11 and PostgreSQL 16.2. Durability settings stayed enabled. These results are not a controlled comparison with the four-CPU Windows Docker VM.
-
-| Run | Result | Acknowledged falls on feed | Fall POST-to-feed p95 |
-|---|---|---|---|
-| 30-second closed-loop throughput | 1,755,375 accepted; 58,477/s over 30.018s | 23,162 of 23,162 | 28.714 ms |
-| 5-minute scenario, first 30-second 50K/s burst | 1,500,000 scheduled, sent and accepted | 19,826 of 19,826 | 18.650 ms |
-| Same scenario, second 30-second 50K/s burst | 1,500,000 scheduled, sent and accepted | 19,746 of 19,746 | 16.894 ms |
-
-The complete scenario scheduled and sent 4,200,000 events. All were acknowledged: 4,199,967 fresh acceptances and 33 duplicate acknowledgements after retries. The final journal held exactly 4,200,000 events and 55,361 alarms; every acknowledged fall reached the feed. All 60,000 events buffered during the 20%-device, 60-second outage replayed. The API was hard-killed at 180.442s and ready again at 180.772s. There were no final HTTP/transport errors, unsent events or unflushed offline events. All 61 live read checks passed; those checked shape/ranges, not an independent aggregation oracle. Database counts persisted after the final API stop.
-
-The generator previously dropped scheduled work even against an immediate-response endpoint. Its default bounded queue is unchanged; these fixed-rate runs explicitly used 16,384 scheduled slots, 327.68ms at 50K/s. The two burst cohorts' schedule-to-feed p95s were 100.119ms and 25.902ms, so queueing was included in the observed deadline. Actual starts and acknowledgements beyond each phase remain in the JSON. No ACK-before-commit, disabled durability, multi-event API or hidden tail was used.
-
-Final verification passed 105 top-level tests plus 56 subtests with race detection, vet and the documented pooled-DSN preservation check. Readiness still requires the documented single-instance/coordinated-upgrade model. Strict chronological room delivery for arbitrarily late events remains a stated tradeoff; retention remains design-only. No private grader score is inferred.
-
-Raw summaries and phase accounting: [full scenario](docs/benchmarks/full-scenario.json), [closed-loop capacity](docs/benchmarks/closed-loop-30s.json). The traffic command is in README; process lifecycle, live queries and database reconciliation were driven separately.
-
-## Run
+The `.env` setup exports `DATABASE_URL` for the host process; Compose does not export it to the host shell. Integration tests need a dedicated database/schema, and leave other schemas intact.
 
 ```bash
-docker compose up -d db
-cp .env.example .env && set -a && source .env && set +a
+docker compose -p teton-streaming up -d db
+cp .env.example .env
+set -a && source .env && set +a
 go run ./cmd/server
-go test -race -count=1 -p 1 ./...
 ```
 
-## Deferred
+Run tests from a second shell with the same `.env` exports:
 
-Load measurement on suitable hardware, journal retention.
+```bash
+set -a && source .env && set +a
+go test -race -count=1 -p 1 ./...
+```
