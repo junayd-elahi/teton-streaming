@@ -52,4 +52,4 @@ For concurrent burst measurements, use `go run ./tools/load -help`. The tool rep
 
 Request validation and HTTP handlers live in [internal/api](internal/api). The [ingestion writers](internal/ingest) batch events for the [PostgreSQL store](internal/store). [Occupancy calculations](internal/aggregation), [schema migrations](migrations) and [integration tests](tests/integration) are kept alongside the service.
 
-Developed by Junayd Elahi with Claude and Codex.
+Developed by Junayd Elahi, assisted by Claude and Codex.
