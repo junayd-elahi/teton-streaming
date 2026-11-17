@@ -46,7 +46,7 @@ git clone https://github.com/Teton-ai/careers-challenge-streaming-backend.git ..
 python3 ../teton-challenge/eval/check.py smoke --target http://localhost:8080 --devices 50
 ```
 
-For concurrent burst measurements, use `go run ./tools/load -help`. The tool reports scheduled requests, requests actually sent, durable acknowledgements and alarm latency separately. The service reached two 50,000-event/s bursts in one earlier run. Two repeats sent 90% and 96% of the schedule, so repeatable capacity at that rate remains unverified.
+For concurrent burst measurements, use `go run ./tools/load -help`. The tool reports scheduled requests, requests actually sent, durable acknowledgements and alarm latency separately. In one earlier five-minute run on a 9-CPU Linux host shared by the service, PostgreSQL and the load tool, the service acknowledged every event scheduled across two 30-second bursts at 50,000 events/s ([results](docs/benchmarks/full-scenario.json)). In two separate runs, the load tool sent 90% and 96% of the schedule, and every event it sent was acknowledged and persisted ([results](docs/benchmarks/repeat-runs.json)). Repeatable capacity at that rate remains unverified.
 
 ## Code
 
